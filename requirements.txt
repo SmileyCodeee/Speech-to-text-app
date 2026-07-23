@@ -5,6 +5,20 @@ streamlit>=1.36
 openai-whisper
 torch
 
+# Audio decoding/normalization (used to re-encode and safely decode audio
+# before it reaches Whisper, avoiding silent 0-sample decode failures on
+# some browser-recorded files)
+soundfile
+numpy
+
+# Portable ffmpeg fallback — used automatically if ffmpeg isn't found on
+# the system PATH, so a system-wide ffmpeg install isn't strictly required
+imageio-ffmpeg
+
+# Online transcription mode (Google's free Web Speech API) — optional
+# alternative to offline Whisper, needs internet at transcription time
+SpeechRecognition
+
 # Text processing / keyword extraction (lightweight, multilingual)
 yake
 
