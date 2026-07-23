@@ -1,0 +1,17 @@
+# Core UI
+streamlit>=1.36
+
+# Speech recognition (open-source, offline-capable, ~100 languages)
+openai-whisper
+torch
+
+# Text processing / keyword extraction (lightweight, multilingual)
+yake
+
+# Export formats
+python-docx
+reportlab
+
+# Optional: abstractive summarization (only needed if you pick
+# "abstractive" summarization mode in the sidebar)
+transformers
