@@ -1,26 +1,14 @@
 """
 asr_engine.py
 --------------
-Speech-to-text engine built on OpenAI Whisper (open-source, offline-capable,
-multilingual ASR model supporting ~100 languages with automatic language
-detection). This is the "Speech Recognition" component from the project's
-proposed pipeline.
+Speech-to-text engine with two modes:
+  - "offline": OpenAI Whisper, runs fully locally after the model is
+    downloaded once. Supports auto-detect and ~100 languages.
+  - "online": Google's free Web Speech API via the `SpeechRecognition`
+    library. No local model needed, but requires internet and a specific
+    language (no auto-detect).
 
 Reference: OpenAI Whisper - https://github.com/openai/whisper
-"Robust Speech Recognition via Large-Scale Weak Supervision" (Radford et al., 2022)
-
---------------------------------------------------------------------------
-FIX (see bottom of file for full explanation):
-Previously this module normalized audio with its own ffmpeg call, then
-passed the *file path* to whisper's model.transcribe(). Whisper then runs
-a SECOND, internal ffmpeg subprocess to decode that same file. That second
-decode could silently return 0 samples for some browser-recorded files,
-which crashed deep inside the encoder with:
-    "cannot reshape tensor of 0 elements into shape [1, 0, 12, -1]"
-Fix: decode the normalized WAV ourselves with `soundfile` and pass the
-resulting numpy array directly to transcribe(), skipping Whisper's
-internal (unchecked) ffmpeg decode entirely.
---------------------------------------------------------------------------
 """
 
 import os
@@ -35,15 +23,13 @@ import soundfile as sf
 
 warnings.filterwarnings("ignore")
 
-# ---------------------------------------------------------------------
-# Locate ffmpeg WITHOUT a hardcoded, machine-specific path.
-# The previous version hardcoded a path under a specific Windows user
-# profile (C:\Users\Lenovo\...) which only works on that one machine.
-# This checks PATH first, and falls back to the `imageio-ffmpeg` pip
-# package (which ships a portable ffmpeg binary) if ffmpeg isn't found
-# on PATH - works cross-platform, no manual install required.
-# ---------------------------------------------------------------------
+
 def _resolve_ffmpeg() -> str:
+    """
+    Locate ffmpeg without a hardcoded, machine-specific path. Checks PATH
+    first, then falls back to the `imageio-ffmpeg` pip package (a portable
+    ffmpeg binary) so this works across machines without manual setup.
+    """
     found = shutil.which("ffmpeg")
     if found:
         return found
@@ -57,10 +43,9 @@ def _resolve_ffmpeg() -> str:
             "pip install imageio-ffmpeg"
         )
 
+
 FFMPEG_BIN = _resolve_ffmpeg()
 
-# Whisper's built-in language codes -> human-readable names (subset shown in UI).
-# Full list: https://github.com/openai/whisper/blob/main/whisper/tokenizer.py
 SUPPORTED_LANGUAGES = {
     "Auto-detect": None,
     "English": "en",
@@ -88,6 +73,14 @@ SUPPORTED_LANGUAGES = {
 MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
 TARGET_SAMPLE_RATE = 16000
 
+# Maps ISO-639-1 codes to locale codes Google's Web Speech API expects.
+ONLINE_LOCALE_MAP = {
+    "en": "en-US", "hi": "hi-IN", "as": "as-IN", "bn": "bn-IN", "es": "es-ES",
+    "fr": "fr-FR", "de": "de-DE", "zh": "zh-CN", "ja": "ja-JP", "ko": "ko-KR",
+    "ar": "ar-SA", "ru": "ru-RU", "pt": "pt-PT", "it": "it-IT", "ta": "ta-IN",
+    "te": "te-IN", "ur": "ur-PK", "mr": "mr-IN", "gu": "gu-IN", "pa": "pa-IN",
+}
+
 
 @dataclass
 class Segment:
@@ -105,10 +98,10 @@ class TranscriptionResult:
 
 def _normalize_audio(input_path: str) -> str:
     """
-    Re-encode audio into a clean 16kHz mono WAV via ffmpeg. This fixes the
-    common case where browser-recorded audio (WebM/Opus blobs) plays fine
-    in a browser's lenient player but has incomplete container metadata
-    that makes ffmpeg's stricter decoder misbehave when read directly.
+    Re-encode audio into a clean 16kHz mono WAV via ffmpeg. Browser-recorded
+    audio (WebM/Opus blobs) often plays fine in a browser's lenient player
+    but has incomplete container metadata that trips up stricter decoders
+    downstream. Used for both offline and online transcription paths.
     """
     output_path = input_path + "_normalized.wav"
     cmd = [
@@ -126,49 +119,31 @@ def _normalize_audio(input_path: str) -> str:
 
 def _load_audio_array(wav_path: str) -> np.ndarray:
     """
-    THE CORE FIX.
-
-    Decode the already-normalized WAV ourselves with `soundfile` and return
-    a float32 mono numpy array, instead of handing the file path to
-    whisper.transcribe(). Whisper would otherwise run its OWN internal
-    ffmpeg subprocess to decode the file a second time - and that second,
-    unchecked decode is what was silently producing 0 samples and crashing
-    the encoder with the "reshape tensor of 0 elements" error.
-
-    Reading the file ourselves means:
-      - Only ONE ffmpeg decode happens in the whole pipeline (ours).
-      - We can check the result BEFORE handing it to the model, and fail
-        with a clear, actionable error instead of a cryptic tensor crash.
+    Decode the normalized WAV ourselves with `soundfile` and hand Whisper a
+    numpy array directly, instead of a file path. This avoids Whisper
+    running its own internal, unchecked ffmpeg decode a second time, which
+    could silently return 0 samples for some browser-recorded files and
+    crash with "reshape tensor of 0 elements".
     """
     audio, sr = sf.read(wav_path, dtype="float32", always_2d=False)
-
     if audio.ndim > 1:
-        audio = audio.mean(axis=1)  # collapse to mono if needed
-
+        audio = audio.mean(axis=1)
     if sr != TARGET_SAMPLE_RATE:
         raise ValueError(
-            f"Normalized audio has sample rate {sr}Hz, expected "
-            f"{TARGET_SAMPLE_RATE}Hz. The ffmpeg normalization step may "
-            "not have applied correctly."
+            f"Normalized audio has sample rate {sr}Hz, expected {TARGET_SAMPLE_RATE}Hz."
         )
-
     if audio.size == 0:
         raise ValueError(
             f"Decoded 0 audio samples from '{wav_path}'. The recording is "
-            "likely empty, silent, or the source file was corrupted. "
-            "Try re-recording or re-uploading the file."
+            "likely empty, silent, or corrupted. Try re-recording."
         )
-
     return audio
 
 
 class ASREngine:
     """
-    Thin wrapper around openai-whisper that:
-      - Lazily loads the model (only once, cached across calls).
-      - Supports automatic language detection or a user-forced language.
-      - Returns text plus timestamped segments (segments are later used by
-        text_processor.py to infer paragraph/topic breaks from pauses).
+    Wrapper around openai-whisper (offline) with an online fallback via
+    Google's free Web Speech API.
     """
 
     def __init__(self, model_size: str = "small"):
@@ -179,8 +154,7 @@ class ASREngine:
 
     def _load_model(self):
         if self._model is None:
-            import whisper  # imported lazily so the rest of the app works
-            # without whisper/torch installed (e.g. for UI development/tests).
+            import whisper
             self._model = whisper.load_model(self.model_size)
         return self._model
 
@@ -189,16 +163,20 @@ class ASREngine:
         audio_path: str,
         language: Optional[str] = None,
         task: str = "transcribe",
+        mode: str = "offline",
     ) -> TranscriptionResult:
         """
-        Transcribe an audio file (wav/mp3/m4a/etc - anything ffmpeg can read).
-
         Args:
             audio_path: path to the audio file.
-            language: Whisper language code (e.g. "en", "hi") or None to
-                      auto-detect from the first 30 seconds of audio.
-            task: "transcribe" (keep original language) or "translate"
-                  (translate speech into English).
+            language: language code (e.g. "en", "hi") or None to auto-detect
+                      (offline mode only — online mode requires a specific
+                      language and defaults to English if none given).
+            task: "transcribe" or "translate" (offline mode only).
+            mode: "offline" -> local Whisper model, fully private, works
+                  without internet after the model is downloaded once.
+                  "online"  -> Google's free Web Speech API. No local model
+                  needed, but requires internet and sends audio to Google's
+                  servers.
         """
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -209,13 +187,11 @@ class ASREngine:
                 "The recording may not have finished saving. Try re-recording."
             )
 
-        # Step 1: normalize to a clean 16kHz mono WAV (our own ffmpeg call,
-        # checked for success).
         normalized_path = _normalize_audio(audio_path)
 
-        # Step 2: decode that WAV ourselves into a numpy array (also
-        # checked for success) - this is the fix. We never again hand a
-        # file path to whisper, so its internal ffmpeg decode never runs.
+        if mode == "online":
+            return _transcribe_online(normalized_path, language_code=language or "en")
+
         audio_array = _load_audio_array(normalized_path)
 
         model = self._load_model()
@@ -237,6 +213,35 @@ class ASREngine:
             language=result.get("language", language or "unknown"),
             segments=segments,
         )
+
+def _transcribe_online(wav_path: str, language_code: str = "en") -> TranscriptionResult:
+    """
+    Online ASR using Google's free Web Speech API via `SpeechRecognition`.
+    Requires internet. No timestamped segments are returned (Google's free
+    endpoint doesn't provide them), so paragraph structuring will fall back
+    to sentence-count windows for online transcripts.
+    """
+    import speech_recognition as sr
+
+    locale = ONLINE_LOCALE_MAP.get(
+        language_code, language_code if "-" in language_code else "en-US"
+    )
+
+    recognizer = sr.Recognizer()
+    with sr.AudioFile(wav_path) as source:
+        audio_data = recognizer.record(source)
+
+    try:
+        text = recognizer.recognize_google(audio_data, language=locale)
+    except sr.UnknownValueError:
+        text = ""
+    except sr.RequestError as e:
+        raise ConnectionError(
+            f"Could not reach Google's speech API (no internet or service "
+            f"unavailable): {e}. Try switching to Offline mode instead."
+        )
+
+    return TranscriptionResult(text=text.strip(), language=locale, segments=[])
 
 
 def language_name_to_code(name: str) -> Optional[str]:

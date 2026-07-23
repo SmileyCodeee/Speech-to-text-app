@@ -66,6 +66,17 @@ with st.sidebar:
         help="Larger models are more accurate but slower and use more memory. "
              "'small' is a good balance for most machines.",
     )
+
+    transcription_mode = st.radio(
+        "Transcription mode",
+        ["offline", "online"],
+        format_func=lambda x: "Offline (private, works without internet)" if x == "offline"
+        else "Online (Google Web Speech API, needs internet)",
+        help="Offline uses the local Whisper model. Online uses Google's "
+             "free speech API — faster to start (no model download) but "
+             "requires an internet connection and sends audio to Google.",
+    )
+
     language_name = st.selectbox(
         "Spoken language",
         list(SUPPORTED_LANGUAGES.keys()),
@@ -95,8 +106,9 @@ with st.sidebar:
     st.divider()
     st.caption(
         "Runs locally using OpenAI Whisper for ASR and lightweight, "
-        "language-agnostic NLP for structuring/summarization/keywords — "
-        "audio never has to leave your machine."
+        "language-agnostic NLP for structuring/summarization/keywords. "
+        "Offline mode keeps audio on your machine; online mode sends it to "
+        "Google's speech API."
     )
 
 # --------------------------------------------------------------------------
@@ -147,7 +159,10 @@ if audio_source_path:
             try:
                 engine = get_engine(model_size)
                 start = time.time()
-                result = engine.transcribe(audio_source_path, language=lang_code, task=task)
+                result = engine.transcribe(
+                    audio_source_path, language=lang_code, task=task,
+                    mode=transcription_mode,
+                )
                 elapsed = time.time() - start
 
                 st.session_state.transcript_text = result.text

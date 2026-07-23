@@ -17,8 +17,6 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
 
 def to_txt(title: str, paragraphs: List[str], summary: str = "", keywords: Optional[List[str]] = None) -> bytes:
@@ -46,8 +44,7 @@ def to_markdown(title: str, paragraphs: List[str], summary: str = "", keywords: 
 
 def to_docx(title: str, paragraphs: List[str], summary: str = "", keywords: Optional[List[str]] = None) -> bytes:
     doc = Document()
-
-    heading = doc.add_heading(title, level=1)
+    doc.add_heading(title, level=1)
 
     if summary:
         doc.add_heading("Summary", level=2)
