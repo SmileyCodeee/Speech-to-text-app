@@ -2,13 +2,16 @@
 asr_engine.py
 --------------
 Speech-to-text engine with two modes:
-  - "offline": OpenAI Whisper, runs fully locally after the model is
-    downloaded once. Supports auto-detect and ~100 languages.
+  - "offline": faster-whisper (CTranslate2 reimplementation of OpenAI
+    Whisper) — same model weights and accuracy as openai-whisper, but
+    2-4x faster on CPU thanks to quantized inference (int8/float16).
+    Runs fully locally after the model is downloaded once.
   - "online": Google's free Web Speech API via the `SpeechRecognition`
     library. No local model needed, but requires internet and a specific
     language (no auto-detect).
 
-Reference: OpenAI Whisper - https://github.com/openai/whisper
+Reference: faster-whisper - https://github.com/SYSTRAN/faster-whisper
+Reference: OpenAI Whisper  - https://github.com/openai/whisper
 """
 
 import os
@@ -119,11 +122,10 @@ def _normalize_audio(input_path: str) -> str:
 
 def _load_audio_array(wav_path: str) -> np.ndarray:
     """
-    Decode the normalized WAV ourselves with `soundfile` and hand Whisper a
-    numpy array directly, instead of a file path. This avoids Whisper
-    running its own internal, unchecked ffmpeg decode a second time, which
-    could silently return 0 samples for some browser-recorded files and
-    crash with "reshape tensor of 0 elements".
+    Decode the normalized WAV ourselves with `soundfile` and hand the model
+    a numpy array directly, instead of a file path. This avoids relying on
+    an internal, unchecked decode step that could silently return 0 samples
+    for some browser-recorded files.
     """
     audio, sr = sf.read(wav_path, dtype="float32", always_2d=False)
     if audio.ndim > 1:
@@ -142,7 +144,7 @@ def _load_audio_array(wav_path: str) -> np.ndarray:
 
 class ASREngine:
     """
-    Wrapper around openai-whisper (offline) with an online fallback via
+    Wrapper around faster-whisper (offline) with an online fallback via
     Google's free Web Speech API.
     """
 
@@ -154,8 +156,14 @@ class ASREngine:
 
     def _load_model(self):
         if self._model is None:
-            import whisper
-            self._model = whisper.load_model(self.model_size)
+            from faster_whisper import WhisperModel
+            # compute_type="int8" gives the biggest CPU speedup with a
+            # negligible accuracy trade-off vs the original fp32 weights.
+            # device="auto" picks GPU (CUDA) automatically if available,
+            # otherwise falls back to CPU with int8 quantization.
+            self._model = WhisperModel(
+                self.model_size, device="auto", compute_type="int8"
+            )
         return self._model
 
     def transcribe(
@@ -172,8 +180,8 @@ class ASREngine:
                       (offline mode only — online mode requires a specific
                       language and defaults to English if none given).
             task: "transcribe" or "translate" (offline mode only).
-            mode: "offline" -> local Whisper model, fully private, works
-                  without internet after the model is downloaded once.
+            mode: "offline" -> local faster-whisper model, fully private,
+                  works without internet after the model is downloaded once.
                   "online"  -> Google's free Web Speech API. No local model
                   needed, but requires internet and sends audio to Google's
                   servers.
@@ -195,24 +203,25 @@ class ASREngine:
         audio_array = _load_audio_array(normalized_path)
 
         model = self._load_model()
-        result = model.transcribe(
+        segments_gen, info = model.transcribe(
             audio_array,
             language=language,
             task=task,
-            verbose=False,
-            fp16=False,
+            vad_filter=True,  # skips silent stretches - also speeds things up
         )
 
         segments = [
-            Segment(start=s["start"], end=s["end"], text=s["text"].strip())
-            for s in result.get("segments", [])
+            Segment(start=s.start, end=s.end, text=s.text.strip())
+            for s in segments_gen
         ]
+        full_text = " ".join(s.text for s in segments).strip()
 
         return TranscriptionResult(
-            text=result.get("text", "").strip(),
-            language=result.get("language", language or "unknown"),
+            text=full_text,
+            language=info.language or language or "unknown",
             segments=segments,
         )
+
 
 def _transcribe_online(wav_path: str, language_code: str = "en") -> TranscriptionResult:
     """
