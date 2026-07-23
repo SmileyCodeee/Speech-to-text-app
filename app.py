@@ -77,6 +77,27 @@ with st.sidebar:
              "requires an internet connection and sends audio to Google.",
     )
 
+    decoding_speed = st.radio(
+        "Offline decoding",
+        ["fast", "accurate"],
+        format_func=lambda x: "Fast (greedy, quickest on CPU)" if x == "fast"
+        else "Accurate (beam search, slower on CPU)",
+        index=1,
+        help="'Accurate' uses beam search (beam_size=5) — noticeably slower "
+             "on CPU-only machines. Switch to 'Fast' if offline transcription "
+             "feels stuck or takes too long; it uses greedy decoding instead.",
+    )
+    beam_size = 1 if decoding_speed == "fast" else 5
+
+    vad_filter = st.checkbox(
+        "Skip silent stretches (VAD)",
+        value=True,
+        help="Speeds up transcription by skipping silence, but downloads a "
+             "small separate voice-activity-detection model on first use. "
+             "Turn this off to test whether a stuck transcription is caused "
+             "by that download rather than the main Whisper model.",
+    )
+
     language_name = st.selectbox(
         "Spoken language",
         list(SUPPORTED_LANGUAGES.keys()),
@@ -155,21 +176,55 @@ if audio_source_path:
     st.session_state.audio_path = audio_source_path
     if st.button("🔎 Transcribe Audio", type="primary", use_container_width=True):
         lang_code = language_name_to_code(language_name)
-        with st.spinner(f"Loading Whisper '{model_size}' model and transcribing... this can take a while on first run."):
+
+        # st.status gives a live, updating log of exactly which stage is
+        # running (normalizing / downloading model / decoding), instead of
+        # one static spinner message - this is what previously made a
+        # slow-but-working transcription look identical to a hung one.
+        with st.status(f"Transcribing with Whisper '{model_size}'...", expanded=True) as status:
+            def _update(msg: str) -> None:
+                status.write(msg)
+
             try:
                 engine = get_engine(model_size)
                 start = time.time()
                 result = engine.transcribe(
-                    audio_source_path, language=lang_code, task=task,
+                    audio_source_path,
+                    language=lang_code,
+                    task=task,
                     mode=transcription_mode,
+                    beam_size=beam_size,
+                    vad_filter=vad_filter,
+                    progress_callback=_update,
                 )
                 elapsed = time.time() - start
 
                 st.session_state.transcript_text = result.text
                 st.session_state.detected_language = result.language
-                st.session_state.structured_notes = structure_from_segments(result.segments)
-                st.success(f"Transcribed in {elapsed:.1f}s. Detected language: {result.language}")
+
+                # Online mode (and any path with no timestamps) returns an
+                # empty segments list, so fall back to sentence-count-based
+                # structuring instead of leaving paragraphs empty.
+                if result.segments:
+                    st.session_state.structured_notes = structure_from_segments(result.segments)
+                else:
+                    st.session_state.structured_notes = structure_from_text(result.text)
+
+                if not result.text.strip():
+                    status.update(label="Transcription finished, but no speech was detected.", state="error")
+                    st.warning(
+                        "Transcription finished but returned no text. The "
+                        "recording may be silent, too quiet, or the wrong "
+                        "language was selected — try re-recording, lowering "
+                        "the mic distance, or switching modes."
+                    )
+                else:
+                    status.update(
+                        label=f"Transcribed in {elapsed:.1f}s. Detected language: {result.language}",
+                        state="complete",
+                    )
             except ImportError:
+                status.update(label="Missing dependency", state="error")
                 st.error(
                     "The `openai-whisper` package (and `torch`) isn't installed in this "
                     "environment. Install with:\n\n`pip install -U openai-whisper torch`\n\n"
@@ -177,6 +232,7 @@ if audio_source_path:
                     "`sudo apt install ffmpeg` / `brew install ffmpeg`)."
                 )
             except Exception as e:
+                status.update(label="Transcription failed", state="error")
                 st.error(f"Transcription failed: {e}")
 
 # --------------------------------------------------------------------------

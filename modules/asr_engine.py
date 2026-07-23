@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import warnings
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import numpy as np
 import soundfile as sf
@@ -154,15 +154,30 @@ class ASREngine:
         self.model_size = model_size
         self._model = None
 
-    def _load_model(self):
+    def _load_model(self, progress_callback: Optional[Callable[[str], None]] = None):
         if self._model is None:
             from faster_whisper import WhisperModel
+
+            if progress_callback:
+                progress_callback(
+                    f"Loading Whisper '{self.model_size}' model — if this is the "
+                    "first run, it's downloading the model files now (small ≈ "
+                    "500MB) and this can take a while depending on your "
+                    "connection. Subsequent runs load instantly from local cache."
+                )
+
             # compute_type="int8" gives the biggest CPU speedup with a
             # negligible accuracy trade-off vs the original fp32 weights.
             # device="auto" picks GPU (CUDA) automatically if available,
             # otherwise falls back to CPU with int8 quantization.
+            # cpu_threads is set explicitly - without it, CTranslate2 may
+            # not use all available cores, which is a common cause of
+            # "it just sits there" on CPU-only machines.
             self._model = WhisperModel(
-                self.model_size, device="auto", compute_type="int8"
+                self.model_size,
+                device="auto",
+                compute_type="int8",
+                cpu_threads=max(1, os.cpu_count() or 4),
             )
         return self._model
 
@@ -172,6 +187,9 @@ class ASREngine:
         language: Optional[str] = None,
         task: str = "transcribe",
         mode: str = "offline",
+        beam_size: int = 5,
+        vad_filter: bool = True,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> TranscriptionResult:
         """
         Args:
@@ -185,7 +203,22 @@ class ASREngine:
                   "online"  -> Google's free Web Speech API. No local model
                   needed, but requires internet and sends audio to Google's
                   servers.
+            beam_size: higher = more accurate but slower on CPU. Use 1
+                       (greedy decoding) for the fastest offline results,
+                       5 (default) for the best accuracy.
+            vad_filter: skips silent stretches (faster + often more
+                        accurate), but downloads a small separate VAD model
+                        on first use. Disable to rule out VAD download as
+                        the cause of a stall.
+            progress_callback: optional function called with short status
+                       strings at each stage, so a UI can show exactly
+                       which step is currently running instead of one
+                       static "loading" message.
         """
+        def _report(msg: str) -> None:
+            if progress_callback:
+                progress_callback(msg)
+
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
@@ -195,21 +228,30 @@ class ASREngine:
                 "The recording may not have finished saving. Try re-recording."
             )
 
+        _report("Normalizing audio with ffmpeg...")
         normalized_path = _normalize_audio(audio_path)
 
         if mode == "online":
+            _report("Sending audio to Google's Web Speech API...")
             return _transcribe_online(normalized_path, language_code=language or "en")
 
+        _report("Decoding audio into a waveform...")
         audio_array = _load_audio_array(normalized_path)
 
-        model = self._load_model()
+        model = self._load_model(progress_callback=_report)
+
+        _report("Running Whisper transcription...")
         segments_gen, info = model.transcribe(
             audio_array,
             language=language,
             task=task,
-            vad_filter=True,  # skips silent stretches - also speeds things up
+            vad_filter=vad_filter,
+            beam_size=beam_size,
         )
 
+        # segments_gen is a lazy generator - nothing above actually runs
+        # inference until we iterate it here, which is where most of the
+        # wall-clock time is spent for longer audio.
         segments = [
             Segment(start=s.start, end=s.end, text=s.text.strip())
             for s in segments_gen
