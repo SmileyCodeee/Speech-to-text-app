@@ -6,6 +6,7 @@ Speech-to-text engine with two modes:
     Whisper) — same model weights and accuracy as openai-whisper, but
     2-4x faster on CPU thanks to quantized inference (int8/float16).
     Runs fully locally after the model is downloaded once.
+    
   - "online": Google's free Web Speech API via the `SpeechRecognition`
     library. No local model needed, but requires internet and a specific
     language (no auto-detect).
