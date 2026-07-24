@@ -155,12 +155,28 @@ with tab_record:
         audio_source_path = tmp_path.name
         st.audio(audio_value)
 
+        st.download_button(          # ← ADD THIS
+            "⬇️ Download recording (.wav)",
+            data=audio_value.getvalue(),
+            file_name="recording.wav",
+            mime="audio/wav",
+            use_container_width=True,
+        )
+
 with tab_upload:
     st.write("Upload a pre-recorded audio file (wav, mp3, m4a, ogg, flac...).")
     uploaded = st.file_uploader("Choose an audio file", type=["wav", "mp3", "m4a", "ogg", "flac", "webm"])
     if uploaded is not None:
         audio_source_path = save_uploaded_audio(uploaded)
         st.audio(uploaded)
+
+        st.download_button(          # ← ADD THIS
+            f"⬇️ Download original file ({uploaded.name})",
+            data=uploaded.getvalue(),
+            file_name=uploaded.name,
+            mime=uploaded.type or "application/octet-stream",
+            use_container_width=True,
+        )
 
 with tab_paste:
     st.write("Already have a transcript? Paste it here to skip straight to structuring/summarizing.")
