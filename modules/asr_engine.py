@@ -1,15 +1,20 @@
 """
 asr_engine.py
 --------------
-Speech-to-text engine with two modes:
-  - "offline": faster-whisper (CTranslate2 reimplementation of OpenAI
-    Whisper) — same model weights and accuracy as openai-whisper, but
-    2-4x faster on CPU thanks to quantized inference (int8/float16).
-    Runs fully locally after the model is downloaded once.
-    
-  - "online": Google's free Web Speech API via the `SpeechRecognition`
-    library. No local model needed, but requires internet and a specific
-    language (no auto-detect).
+Speech-to-text engine using faster-whisper (CTranslate2 reimplementation
+of OpenAI Whisper) — same model weights and accuracy, but 2-4x faster
+on CPU thanks to quantized inference (int8/float16).
+
+Runs fully locally after the model is downloaded once. No internet,
+no API keys, no credentials needed. Supports ~100 languages with
+auto-detect, and optional translation to English.
+
+This is the "offline ASR" component of the hybrid architecture:
+  - ASR:        faster-whisper  (offline, local)
+  - Processing: formatting, keywords, extractive summary (offline, local)
+  - Summarize:  abstractive summary (online, optional — falls back to local)
+  - Read aloud: gTTS (online, optional)
+  - Export:     .txt/.docx/.pdf/.md (offline, local)
 
 Reference: faster-whisper - https://github.com/SYSTRAN/faster-whisper
 Reference: OpenAI Whisper  - https://github.com/openai/whisper
@@ -77,14 +82,6 @@ SUPPORTED_LANGUAGES = {
 MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
 TARGET_SAMPLE_RATE = 16000
 
-# Maps ISO-639-1 codes to locale codes Google's Web Speech API expects.
-ONLINE_LOCALE_MAP = {
-    "en": "en-US", "hi": "hi-IN", "as": "as-IN", "bn": "bn-IN", "es": "es-ES",
-    "fr": "fr-FR", "de": "de-DE", "zh": "zh-CN", "ja": "ja-JP", "ko": "ko-KR",
-    "ar": "ar-SA", "ru": "ru-RU", "pt": "pt-PT", "it": "it-IT", "ta": "ta-IN",
-    "te": "te-IN", "ur": "ur-PK", "mr": "mr-IN", "gu": "gu-IN", "pa": "pa-IN",
-}
-
 
 @dataclass
 class Segment:
@@ -105,7 +102,7 @@ def _normalize_audio(input_path: str) -> str:
     Re-encode audio into a clean 16kHz mono WAV via ffmpeg. Browser-recorded
     audio (WebM/Opus blobs) often plays fine in a browser's lenient player
     but has incomplete container metadata that trips up stricter decoders
-    downstream. Used for both offline and online transcription paths.
+    downstream.
     """
     output_path = input_path + "_normalized.wav"
     cmd = [
@@ -145,8 +142,9 @@ def _load_audio_array(wav_path: str) -> np.ndarray:
 
 class ASREngine:
     """
-    Wrapper around faster-whisper (offline) with an online fallback via
-    Google's free Web Speech API.
+    Wrapper around faster-whisper for fully local, private speech-to-text.
+    No internet needed after the model is downloaded once. No API keys
+    or credentials required.
     """
 
     def __init__(self, model_size: str = "small"):
@@ -167,13 +165,6 @@ class ASREngine:
                     "connection. Subsequent runs load instantly from local cache."
                 )
 
-            # compute_type="int8" gives the biggest CPU speedup with a
-            # negligible accuracy trade-off vs the original fp32 weights.
-            # device="auto" picks GPU (CUDA) automatically if available,
-            # otherwise falls back to CPU with int8 quantization.
-            # cpu_threads is set explicitly - without it, CTranslate2 may
-            # not use all available cores, which is a common cause of
-            # "it just sits there" on CPU-only machines.
             self._model = WhisperModel(
                 self.model_size,
                 device="auto",
@@ -187,7 +178,6 @@ class ASREngine:
         audio_path: str,
         language: Optional[str] = None,
         task: str = "transcribe",
-        mode: str = "offline",
         beam_size: int = 5,
         vad_filter: bool = True,
         progress_callback: Optional[Callable[[str], None]] = None,
@@ -195,26 +185,19 @@ class ASREngine:
         """
         Args:
             audio_path: path to the audio file.
-            language: language code (e.g. "en", "hi") or None to auto-detect
-                      (offline mode only — online mode requires a specific
-                      language and defaults to English if none given).
-            task: "transcribe" or "translate" (offline mode only).
-            mode: "offline" -> local faster-whisper model, fully private,
-                  works without internet after the model is downloaded once.
-                  "online"  -> Google's free Web Speech API. No local model
-                  needed, but requires internet and sends audio to Google's
-                  servers.
+            language: language code (e.g. "en", "hi") or None to auto-detect.
+            task: "transcribe" (keep original language) or "translate"
+                  (translate to English).
             beam_size: higher = more accurate but slower on CPU. Use 1
-                       (greedy decoding) for the fastest offline results,
-                       5 (default) for the best accuracy.
+                       (greedy decoding) for the fastest results, 5
+                       (default) for the best accuracy.
             vad_filter: skips silent stretches (faster + often more
                         accurate), but downloads a small separate VAD model
                         on first use. Disable to rule out VAD download as
                         the cause of a stall.
             progress_callback: optional function called with short status
                        strings at each stage, so a UI can show exactly
-                       which step is currently running instead of one
-                       static "loading" message.
+                       which step is currently running.
         """
         def _report(msg: str) -> None:
             if progress_callback:
@@ -232,10 +215,6 @@ class ASREngine:
         _report("Normalizing audio with ffmpeg...")
         normalized_path = _normalize_audio(audio_path)
 
-        if mode == "online":
-            _report("Sending audio to Google's Web Speech API...")
-            return _transcribe_online(normalized_path, language_code=language or "en")
-
         _report("Decoding audio into a waveform...")
         audio_array = _load_audio_array(normalized_path)
 
@@ -250,9 +229,6 @@ class ASREngine:
             beam_size=beam_size,
         )
 
-        # segments_gen is a lazy generator - nothing above actually runs
-        # inference until we iterate it here, which is where most of the
-        # wall-clock time is spent for longer audio.
         segments = [
             Segment(start=s.start, end=s.end, text=s.text.strip())
             for s in segments_gen
@@ -266,34 +242,25 @@ class ASREngine:
         )
 
 
-def _transcribe_online(wav_path: str, language_code: str = "en") -> TranscriptionResult:
+# ── gTTS language mapping ──
+# Maps faster-whisper / ISO-639-1 language codes to gTTS language codes.
+# gTTS uses Google Translate's language codes which differ slightly
+# from ISO-639-1 (e.g. 'zh' → 'zh-CN').
+GTTS_LANG_MAP = {
+    "en": "en", "hi": "hi", "as": "en",  # Assamese not in gTTS → fallback English
+    "bn": "bn", "es": "es", "fr": "fr", "de": "de",
+    "zh": "zh-CN", "ja": "ja", "ko": "ko", "ar": "ar",
+    "ru": "ru", "pt": "pt", "it": "it", "ta": "ta",
+    "te": "te", "ur": "ur", "mr": "mr", "gu": "gu", "pa": "pa",
+}
+
+
+def get_gtts_language(lang_code: str) -> str:
     """
-    Online ASR using Google's free Web Speech API via `SpeechRecognition`.
-    Requires internet. No timestamped segments are returned (Google's free
-    endpoint doesn't provide them), so paragraph structuring will fall back
-    to sentence-count windows for online transcripts.
+    Map a faster-whisper language code to a gTTS language code.
+    Falls back to English if the language isn't supported by gTTS.
     """
-    import speech_recognition as sr
-
-    locale = ONLINE_LOCALE_MAP.get(
-        language_code, language_code if "-" in language_code else "en-US"
-    )
-
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(wav_path) as source:
-        audio_data = recognizer.record(source)
-
-    try:
-        text = recognizer.recognize_google(audio_data, language=locale)
-    except sr.UnknownValueError:
-        text = ""
-    except sr.RequestError as e:
-        raise ConnectionError(
-            f"Could not reach Google's speech API (no internet or service "
-            f"unavailable): {e}. Try switching to Offline mode instead."
-        )
-
-    return TranscriptionResult(text=text.strip(), language=locale, segments=[])
+    return GTTS_LANG_MAP.get(lang_code, "en")
 
 
 def language_name_to_code(name: str) -> Optional[str]:

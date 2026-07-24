@@ -1,84 +1,121 @@
 # Speech-to-Text Note Taking Application
 
-A multilingual, privacy-first note-taking app that converts spoken audio
-(live recording or uploaded files) into clean, structured, exportable notes —
-with automatic summarization and keyword extraction.
+A multilingual, privacy-first note-taking app that converts spoken audio (live recording or uploaded files) into clean, structured, exportable notes — with automatic summarization, keyword extraction, and optional read-aloud.
 
-Built to match the project brief: real-time ASR, automatic note structuring,
-multilingual support, multiple export formats, and both offline and online
-processing. Works on **Windows** and **Linux** (and macOS).
+**Hybrid architecture** — most features work fully offline, with optional online enhancements. Works on Windows, Linux, and macOS.
 
-## Pipeline
+---
+
+## Pipeline — Hybrid Architecture
 
 ```
-Audio (mic / file) ──▶ Normalize (ffmpeg) ──▶ ASR (faster-whisper / Google) ──▶ Text Structuring ──▶ Summarization
-                                                                                       │                    │
-                                                                                       ▼                    ▼
-                                                                                 Keyword Extraction    Export (.txt/.docx/.pdf/.md)
+                          AUDIO INPUT
+                         /            \
+                Microphone          Audio File
+                         \            /
+                          \          /
+                           ▼        ▼
+                    Faster-Whisper
+                 (Local ASR — OFFLINE)
+                           │
+                           ▼
+                   Transcribed Text
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+       Local Processing          Online Processing
+          (OFFLINE)                 (OPTIONAL)
+      • Formatting              • Abstractive Summary
+      • Keywords (YAKE)           (Hugging Face BART)
+      • Extractive Summary      • 🔊 Read Aloud (gTTS)
+              │                         │
+              └────────────┬────────────┘
+                           ▼
+                    Structured Notes
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+         Export Notes             🔊 Read Notes Aloud
+       TXT / DOCX / PDF / MD             │
+            (OFFLINE)                    ▼
+                                        gTTS
+                                      (ONLINE)
 ```
 
-| Stage              | Technique / Library                              |
-|--------------------|---------------------------------------------------|
-| Audio capture      | Streamlit `st.audio_input` (browser mic) / file upload — both offer a direct download button for the captured/uploaded audio |
-| Audio normalization| ffmpeg re-encode to 16kHz mono WAV, decoded via `soundfile` — avoids silent 0-sample decode failures on browser-recorded audio |
-| Speech recognition | **Offline**: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2 reimplementation of OpenAI Whisper) — same accuracy as the original model, 2-4x faster on CPU via int8 quantization, ~100 languages, auto language detection, adjustable beam size and voice-activity-detection (VAD) filtering. **Online**: Google's free Web Speech API via `SpeechRecognition` — no model download, but needs internet and a specific language |
-| Text structuring   | Pause-based paragraph segmentation (offline mode) + regex sentence splitting with a word-window fallback for unpunctuated speech |
-| Summarization      | **Extractive**: graph-based TextRank (sentences ranked by similarity to the rest of the transcript, not just raw word frequency — more accurate at surfacing genuinely central sentences and ignoring filler). Offline, any language. **Abstractive** (optional): Hugging Face BART, loaded directly via `AutoModelForSeq2SeqLM` with beam search for more coherent output |
-| Keyword extraction | [YAKE](https://github.com/LIAAD/yake) — unsupervised, multilingual |
-| Export             | `python-docx` (.docx), `reportlab` (.pdf), plain `.txt`, `.md` |
-| Interface          | [Streamlit](https://streamlit.io/) |
+| Stage | Technique / Library | Offline? |
+|---|---|---|
+| Audio capture | Streamlit `st.audio_input` (browser mic) / file upload — both offer a direct download button for the captured/uploaded audio | ✓ |
+| Audio normalization | ffmpeg re-encode to 16kHz mono WAV, decoded via `soundfile` — avoids silent 0-sample decode failures on browser-recorded audio. Falls back to `imageio-ffmpeg` portable binary if system ffmpeg isn't found. | ✓ |
+| Speech recognition | `faster-whisper` (CTranslate2) — same accuracy as OpenAI Whisper, 2–4× faster on CPU via int8 quantization. ~100 languages, auto-detect, adjustable beam size and VAD. No API keys needed. | ✓ |
+| Text structuring | Pause-based paragraph segmentation using Whisper timestamps + regex sentence splitting with word-window fallback | ✓ |
+| Keyword extraction | YAKE — unsupervised, multilingual, with comprehensive post-filtering to remove generic/useless words | ✓ |
+| Extractive summary | TextRank graph-based with TF-IDF weighting + position bias — ranks sentences by centrality to the transcript's themes, not raw word frequency | ✓ |
+| Abstractive summary | Hugging Face `facebook/bart-large-cnn` via `AutoModelForSeq2SeqLM` — needs internet the first time to download, then cached locally. Falls back to extractive if unavailable. | ✗ (first run) → ✓ (cached) |
+| Read aloud | gTTS — Google Text-to-Speech converts notes/summary into spoken audio. Requires internet. | ✗ |
+| Export | `python-docx` (.docx), `reportlab` (.pdf), plain `.txt`, `.md` | ✓ |
+| Interface | Streamlit | ✓ |
+
+### What works offline vs. online
+
+| Feature | Offline | Online |
+|---|---|---|
+| Record / upload audio | ✓ | ✓ |
+| Transcribe (faster-whisper) | ✓ (after model download) | ✓ (model download) |
+| Auto-detect language | ✓ | ✓ |
+| Translate to English | ✓ | ✓ |
+| Structure into paragraphs | ✓ | ✓ |
+| Extract keywords | ✓ | ✓ |
+| Extractive summary | ✓ | ✓ |
+| Abstractive summary | ✗ (must download model once) | ✓ |
+| Read notes aloud (gTTS) | ✗ | ✓ |
+| Export to TXT/DOCX/PDF/MD | ✓ | ✓ |
+| Edit notes before export | ✓ | ✓ |
+
+> **Bottom line:** After the Whisper model downloads once (requires internet), all core features work fully offline. Only abstractive summarization (first run) and read-aloud need internet.
+
+---
 
 ## Features
 
 - 🎙️ Record live from your browser microphone, or upload a pre-recorded file (wav/mp3/m4a/ogg/flac/webm) — both let you download the captured audio directly.
-- 🌐 **Offline or online transcription**: run faster-whisper fully locally (private, no internet needed after the model is downloaded once), or switch to Google's free Web Speech API for a lighter, no-download option when you have internet.
-- ⚡ **Speed vs. accuracy control**: choose "Fast" (greedy decoding) for quicker offline transcription on CPU, or "Accurate" (beam search) for better quality when time isn't critical. A voice-activity-detection (VAD) toggle can also skip silent stretches to speed things up further.
-- 🌍 **Multilingual**: auto-detect the spoken language or pick from 19+ languages (English, Hindi, Assamese, Bengali, Spanish, French, German, Chinese, Japanese, Korean, Arabic, Russian, and more). Online mode requires picking a specific language (no auto-detect).
-- 🔄 Optional translation of any language directly to English (offline mode).
-- 📝 Automatically restructures raw speech into readable paragraphs/bullet points based on natural pauses (offline mode) or sentence-count windows (online mode, since Google's free API doesn't return timestamps).
-- ✨ One-click summary (TextRank extractive or Hugging Face abstractive) and keyword extraction for quick review.
+- 🔒 Offline ASR — `faster-whisper` runs locally. No audio or text is sent anywhere. No API keys needed.
+- ⚡ Speed vs. accuracy control — choose "Fast" (greedy) or "Accurate" (beam search) decoding, toggle VAD to skip silence.
+- 🌍 Multilingual — auto-detect the spoken language or pick from 20+ languages (English, Hindi, Assamese, Bengali, Spanish, French, German, Chinese, Japanese, Korean, Arabic, Russian, and more).
+- 🔄 Optional translation of any language directly to English.
+- 📝 Automatically restructures raw speech into readable paragraphs/bullet points based on natural pauses.
+- ✨ One-click summary — extractive (TextRank + TF-IDF, offline, any language) or abstractive (BART, needs internet first run, falls back to extractive if offline).
+- 🔑 Keyword extraction with comprehensive post-filtering to remove generic words.
 - ✏️ Edit the generated notes before exporting.
-- 📤 Export to `.txt`, `.docx`, `.pdf`, or `.md`.
-- 🔒 Offline mode keeps audio and text entirely on your machine; online mode sends audio to Google's servers for that transcription only.
+- 📤 Export to `.txt`, `.docx`, `.pdf`, or `.md` — fully offline.
+- 🔊 Read Notes Aloud — gTTS converts your notes or summary into spoken audio you can play in the browser and download as MP3. Requires internet.
+
+---
 
 ## Setup
 
 ### 1. Install ffmpeg
 
-Whisper/faster-whisper and audio normalization both rely on ffmpeg. If it
-isn't found on your system PATH, the app automatically falls back to the
-portable binary bundled with the `imageio-ffmpeg` pip package (already in
-`requirements.txt`), so a system-wide install isn't strictly required —
-but installing it system-wide is still recommended for reliability.
+The app needs ffmpeg to re-encode audio before transcription. If it isn't on your system PATH, the app automatically falls back to the portable binary bundled with `imageio-ffmpeg` (already in `requirements.txt`), so a system-wide install isn't strictly required — but recommended for reliability.
 
 **Windows:**
 ```powershell
 winget install ffmpeg
 ```
-After installing, **fully close and reopen your terminal / IDE** — PATH
-changes only apply to newly started processes, not ones already running.
-Verify it worked with:
-```powershell
-ffmpeg -version
-```
-If that fails to run after a restart, find the install location with:
-```powershell
-Get-Command ffmpeg | Select-Object -ExpandProperty Source
-```
-and manually add that folder to your PATH via
-*Edit the system environment variables → Environment Variables → Path → New*.
+After installing, fully close and reopen your terminal / IDE — PATH changes only apply to newly started processes. Verify with `ffmpeg -version`.
 
 **Linux (Debian/Ubuntu):**
 ```bash
 sudo apt update && sudo apt install ffmpeg
 ```
+
 **Linux (Fedora):**
 ```bash
 sudo dnf install ffmpeg
 ```
-**Linux (Arch):**
+
+**macOS:**
 ```bash
-sudo pacman -S ffmpeg
+brew install ffmpeg
 ```
 
 ### 2. Create a virtual environment and install dependencies
@@ -97,99 +134,90 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-If `pip install` fails on any package with a compiler error on Linux, you
-may need build essentials first:
+If `pip install` fails on Linux with a compiler error:
 ```bash
-sudo apt install build-essential python3-dev
+sudo apt install build-essential python3-dev libsndfile1
 ```
 
-Key packages installed: `streamlit`, `faster-whisper` (offline ASR),
-`soundfile`, `numpy`, `av` (audio decoding), `SpeechRecognition` (online
-mode), `imageio-ffmpeg` (ffmpeg fallback), `yake`, `python-docx`,
-`reportlab`, and `transformers` + `torch` (only used if you select
-"abstractive" summarization).
+Key packages: `streamlit`, `faster-whisper` (ASR), `soundfile`, `numpy`, `imageio-ffmpeg` (ffmpeg fallback), `yake` (keywords), `python-docx`, `reportlab` (export), `transformers` + `torch` (abstractive summary), `gTTS` (read aloud).
+
+> `requirements.txt` lists only direct dependencies with loose version pins. Transitive deps (CUDA libs, triton, etc.) are resolved automatically by pip — this avoids cross-platform conflicts on Windows.
 
 ### 3. Run the app
 
-**Windows:**
-```powershell
-streamlit run app.py
-```
-
-**Linux / macOS:**
 ```bash
 streamlit run app.py
 ```
 
-In **Offline mode**, the first time you transcribe audio, faster-whisper
-will download the chosen model (e.g. `small`) — this requires an internet
-connection once; after that, transcription runs fully offline.
+The first time you transcribe audio, `faster-whisper` downloads the chosen model (e.g. `small` ≈ 500 MB) — this requires internet once; after that, transcription is fully offline.
 
-In **Online mode**, no model download is needed, but every transcription
-requires an active internet connection since audio is sent to Google's
-free Web Speech API.
+### Choosing a Whisper model size
 
-Toggle between the two anytime from the sidebar's "Transcription mode" setting.
+| Size | Speed | Accuracy | Good for |
+|---|---|---|---|
+| tiny | fastest | lowest | quick drafts, low-resource machines |
+| base | fast | ok | short notes |
+| small | balanced | good | recommended default |
+| medium | slower | very good | important recordings |
+| large-v3 | slowest | best | maximum accuracy, needs GPU or patience |
 
-## Choosing a Whisper model size (offline mode)
+> `faster-whisper` uses int8 on CPU (float16 on GPU), giving a 2–4× speedup over the original `openai-whisper`. `device="auto"` picks GPU if available.
 
-| Size    | Approx. speed | Approx. accuracy | Good for |
-|---------|---------------|-------------------|----------|
-| tiny    | fastest       | lowest            | quick drafts, low-resource machines |
-| base    | fast          | ok                | short notes |
-| small   | balanced      | good              | **recommended default** |
-| medium  | slower        | very good         | important recordings |
-| large-v3| slowest       | best              | maximum accuracy, needs a strong GPU or patience on CPU |
+---
 
-Online mode has no model size setting — Google's API handles this server-side.
+## Read Notes Aloud (gTTS)
 
-Within offline mode, the **"Offline decoding"** setting further trades speed
-for quality:
-- **Fast** — greedy decoding (`beam_size=1`), quickest on CPU-only machines.
-- **Accurate** — beam search (`beam_size=5`), slower but generally more precise.
+The 🔊 Read Notes Aloud feature uses gTTS (Google Text-to-Speech) to convert your notes, summary, or both into spoken audio:
 
-The **"Skip silent stretches (VAD)"** toggle uses voice-activity detection to
-skip over silence in the recording, which can noticeably speed up
-transcription of audio with pauses — at the cost of a small extra model
-download the first time it's used.
+1. Choose what to read: **Notes**, **Summary**, or **Notes + Summary**
+2. Click **🔊 Generate Audio**
+3. The audio plays in the browser and can be downloaded as `.mp3`
+
+gTTS auto-detects the language from the transcription result and uses the appropriate voice. If the language isn't supported by gTTS (e.g. Assamese), it falls back to English.
+
+> gTTS requires internet — it sends the text to Google's TTS servers. All other features (ASR, structuring, keywords, extractive summary, export) work offline without internet.
+
+---
 
 ## Project structure
 
 ```
 speech_notes_app/
-├── app.py                  # Streamlit UI - entry point
+├── app.py                  # Streamlit UI — entry point, gTTS read-aloud
 ├── modules/
-│   ├── asr_engine.py        # faster-whisper (offline) + Google Web Speech API (online) ASR, with ffmpeg-based audio normalization
-│   ├── text_processor.py    # Structuring + keyword extraction (YAKE), with a word-window fallback for unpunctuated speech
-│   ├── summarizer.py         # TextRank extractive + optional abstractive summarization
-│   └── exporter.py           # .txt / .docx / .pdf / .md export
+│   ├── asr_engine.py       # faster-whisper ASR (offline) + gTTS lang mapping
+│   ├── text_processor.py   # Structuring + keyword extraction (YAKE) with post-filtering
+│   ├── summarizer.py       # TextRank extractive (offline) + abstractive (online, cached)
+│   └── exporter.py         # .txt / .docx / .pdf / .md export (offline)
 ├── requirements.txt
 └── README.md
 ```
 
+---
+
+## Cross-platform notes
+
+| Aspect | Linux | Windows |
+|---|---|---|
+| Python venv activate | `source venv/bin/activate` | `venv\Scripts\activate` |
+| ffmpeg (system) | `sudo apt install ffmpeg` | `winget install ffmpeg` or manual PATH |
+| ffmpeg (fallback) | `imageio-ffmpeg` portable binary (auto) | Same |
+| GPU acceleration | CUDA toolkit + PyTorch CUDA wheel | PyTorch CUDA wheel from pytorch.org |
+| triton | Auto-installed with CUDA torch | Not on Windows — not needed; int8 works |
+| soundfile / libsndfile | May need `sudo apt install libsndfile1` | Bundled in pip wheel |
+| gTTS (read aloud) | Needs internet | Needs internet |
+
+---
+
 ## Troubleshooting
 
-- **"Transcription failed: [WinError 2] The system cannot find the file specified"** (Windows) — ffmpeg isn't visible on PATH from the process running Streamlit. Restart your terminal/IDE after installing ffmpeg, or rely on the automatic `imageio-ffmpeg` fallback.
-- **"ffmpeg: command not found"** (Linux) — ffmpeg isn't installed system-wide and the `imageio-ffmpeg` fallback wasn't able to run either; install it with your distro's package manager (see Setup step 1) or check `pip show imageio-ffmpeg` installed correctly.
-- **"cannot reshape tensor of 0 elements..."** — usually caused by browser-recorded audio that plays fine but has incomplete container metadata. The app normalizes and decodes audio itself before handing it to the ASR engine, which should prevent this; if it still occurs, try re-recording or re-uploading the file.
-- **Online mode fails with a connection error** — check your internet connection, or switch back to Offline mode from the sidebar.
-- **Offline transcription feels slow or stuck** — switch "Offline decoding" to "Fast", try a smaller model size (e.g. `base` or `tiny`), pick a specific spoken language instead of "Auto-detect", or toggle VAD off to rule out the VAD model download as the cause.
-- **Abstractive summary fails with an "Unknown task" or pipeline-related error** — this is handled automatically: the app loads the BART model directly (bypassing `pipeline("summarization")`), and falls back to the extractive summary with an explanatory message if abstractive summarization still fails for any reason (e.g. no internet on first run).
-- **Summary looks identical to (or very close to) the transcript** — very short recordings (a few sentences) are summarized proportionally rather than cut down to a fixed count; for genuinely short notes, the "summary" may reasonably include most of the content.
-- **`pip install` fails on Linux with a compiler/build error** — install build tools first: `sudo apt install build-essential python3-dev` (Debian/Ubuntu) or the equivalent for your distro.
-
-## Notes & possible extensions
-
-- The "Paste Transcript" tab lets you test structuring/summarization/export
-  without any audio at all — handy for quickly trying the app out.
-- Extractive summarization uses TextRank (graph-based sentence ranking) —
-  more robust than plain word-frequency scoring, but for genuinely fluent,
-  rewritten summaries, use "Abstractive" mode instead.
-- Abstractive summarization defaults to `facebook/bart-large-cnn`, which is
-  English-only; for multilingual abstractive summaries, swap in a model like
-  `csebuetnlp/mT5_multilingual_XLSum` in `summarizer.py`.
-- Online mode uses Google's *free*, unofficial Web Speech endpoint, which
-  has no uptime or rate-limit guarantees — fine for personal/demo use, but
-  not a substitute for a paid API in production.
-- Could be extended with speaker diarization, live streaming transcription,
-  or collaborative/cloud sync for a future version.
+- **`[WinError 2]` (Windows)** — ffmpeg not on PATH. Restart your terminal after installing, or rely on the `imageio-ffmpeg` fallback.
+- **`ffmpeg: command not found` (Linux)** — install with `sudo apt install ffmpeg`.
+- **`cannot reshape tensor of 0 elements...`** — browser-recorded audio with incomplete metadata. The app normalizes audio before Whisper; if it persists, re-record.
+- **Transcription slow or stuck** — switch to "Fast" decoding, try a smaller model (`base`/`tiny`), pick a specific language instead of "Auto-detect", or disable VAD.
+- **Abstractive summary unavailable offline** — the BART model must be downloaded once while online. After that it's cached locally. If offline and not cached, the app automatically falls back to extractive summary with a notice.
+- **"Could not generate audio" (Read Aloud)** — gTTS needs internet. Check your connection. All other features work offline.
+- **gTTS not installed** — run `pip install gTTS`.
+- **Keywords contain generic words** — the app post-filters YAKE keywords against a ~300-word blacklist. Increase the "Number of keywords" slider for more candidates.
+- **`pip install` fails on Linux** — install build tools: `sudo apt install build-essential python3-dev libsndfile1`.
+- **`pip install` fails with NVIDIA/CUDA errors on Windows** — use the cleaned `requirements.txt` (only direct deps). For GPU, install the PyTorch CUDA wheel first from pytorch.org.

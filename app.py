@@ -2,11 +2,15 @@
 app.py
 ------
 Speech-to-Text Note Taking Application
-A multilingual, offline-capable pipeline that turns spoken audio into
-structured, exportable notes.
+A multilingual, hybrid pipeline that turns spoken audio into structured,
+exportable notes.
 
-Pipeline: Audio -> ASR (Whisper) -> Text Structuring -> Summarization
-          -> Keyword Extraction -> Export (.txt / .docx / .pdf / .md)
+Hybrid architecture:
+  - ASR:        faster-whisper           (offline, local)
+  - Processing: formatting, keywords     (offline, local)
+  - Summarize:  extractive (local) / abstractive (online, optional)
+  - Read aloud: gTTS                     (online, optional)
+  - Export:     .txt/.docx/.pdf/.md      (offline, local)
 
 Run with:  streamlit run app.py
 """
@@ -17,7 +21,10 @@ import time
 
 import streamlit as st
 
-from modules.asr_engine import ASREngine, SUPPORTED_LANGUAGES, MODEL_SIZES, language_name_to_code
+from modules.asr_engine import (
+    ASREngine, SUPPORTED_LANGUAGES, MODEL_SIZES,
+    language_name_to_code, get_gtts_language,
+)
 from modules.text_processor import structure_from_segments, structure_from_text, extract_keywords
 from modules.summarizer import summarize
 from modules.exporter import export
@@ -34,6 +41,7 @@ defaults = {
     "summary": "",
     "keywords": [],
     "audio_path": None,
+    "read_aloud_path": None,
 }
 for k, v in defaults.items():
     st.session_state.setdefault(k, v)
@@ -67,24 +75,14 @@ with st.sidebar:
              "'small' is a good balance for most machines.",
     )
 
-    transcription_mode = st.radio(
-        "Transcription mode",
-        ["offline", "online"],
-        format_func=lambda x: "Offline (private, works without internet)" if x == "offline"
-        else "Online (Google Web Speech API, needs internet)",
-        help="Offline uses the local Whisper model. Online uses Google's "
-             "free speech API — faster to start (no model download) but "
-             "requires an internet connection and sends audio to Google.",
-    )
-
     decoding_speed = st.radio(
-        "Offline decoding",
+        "Decoding speed",
         ["fast", "accurate"],
         format_func=lambda x: "Fast (greedy, quickest on CPU)" if x == "fast"
         else "Accurate (beam search, slower on CPU)",
         index=1,
         help="'Accurate' uses beam search (beam_size=5) — noticeably slower "
-             "on CPU-only machines. Switch to 'Fast' if offline transcription "
+             "on CPU-only machines. Switch to 'Fast' if transcription "
              "feels stuck or takes too long; it uses greedy decoding instead.",
     )
     beam_size = 1 if decoding_speed == "fast" else 5
@@ -126,10 +124,10 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Runs locally using OpenAI Whisper for ASR and lightweight, "
-        "language-agnostic NLP for structuring/summarization/keywords. "
-        "Offline mode keeps audio on your machine; online mode sends it to "
-        "Google's speech API."
+        "ASR runs locally using faster-whisper — no internet needed after "
+        "the model downloads once. Structuring, keywords, and extractive "
+        "summary are fully offline. Abstractive summary and 🔊 Read Aloud "
+        "need internet. Audio and text stay on your machine."
     )
 
 # --------------------------------------------------------------------------
@@ -138,7 +136,8 @@ with st.sidebar:
 st.title("Speech-to-Text Note Taking Application")
 st.caption(
     "Convert lectures, meetings, and interviews into clean, structured, "
-    "exportable notes — in real time or from a recording, in your own language."
+    "exportable notes — in real time or from a recording, in your own language. "
+    "ASR is fully offline and private."
 )
 
 tab_record, tab_upload, tab_paste = st.tabs(["🎤 Record", "📁 Upload Audio", "📋 Paste Transcript"])
@@ -155,7 +154,7 @@ with tab_record:
         audio_source_path = tmp_path.name
         st.audio(audio_value)
 
-        st.download_button(          # ← ADD THIS
+        st.download_button(
             "⬇️ Download recording (.wav)",
             data=audio_value.getvalue(),
             file_name="recording.wav",
@@ -170,7 +169,7 @@ with tab_upload:
         audio_source_path = save_uploaded_audio(uploaded)
         st.audio(uploaded)
 
-        st.download_button(          # ← ADD THIS
+        st.download_button(
             f"⬇️ Download original file ({uploaded.name})",
             data=uploaded.getvalue(),
             file_name=uploaded.name,
@@ -193,10 +192,6 @@ if audio_source_path:
     if st.button("🔎 Transcribe Audio", type="primary", use_container_width=True):
         lang_code = language_name_to_code(language_name)
 
-        # st.status gives a live, updating log of exactly which stage is
-        # running (normalizing / downloading model / decoding), instead of
-        # one static spinner message - this is what previously made a
-        # slow-but-working transcription look identical to a hung one.
         with st.status(f"Transcribing with Whisper '{model_size}'...", expanded=True) as status:
             def _update(msg: str) -> None:
                 status.write(msg)
@@ -208,7 +203,6 @@ if audio_source_path:
                     audio_source_path,
                     language=lang_code,
                     task=task,
-                    mode=transcription_mode,
                     beam_size=beam_size,
                     vad_filter=vad_filter,
                     progress_callback=_update,
@@ -218,9 +212,6 @@ if audio_source_path:
                 st.session_state.transcript_text = result.text
                 st.session_state.detected_language = result.language
 
-                # Online mode (and any path with no timestamps) returns an
-                # empty segments list, so fall back to sentence-count-based
-                # structuring instead of leaving paragraphs empty.
                 if result.segments:
                     st.session_state.structured_notes = structure_from_segments(result.segments)
                 else:
@@ -232,7 +223,7 @@ if audio_source_path:
                         "Transcription finished but returned no text. The "
                         "recording may be silent, too quiet, or the wrong "
                         "language was selected — try re-recording, lowering "
-                        "the mic distance, or switching modes."
+                        "the mic distance, or picking a specific language."
                     )
                 else:
                     status.update(
@@ -242,10 +233,11 @@ if audio_source_path:
             except ImportError:
                 status.update(label="Missing dependency", state="error")
                 st.error(
-                    "The `openai-whisper` package (and `torch`) isn't installed in this "
-                    "environment. Install with:\n\n`pip install -U openai-whisper torch`\n\n"
-                    "You'll also need `ffmpeg` installed on your system (e.g. "
-                    "`sudo apt install ffmpeg` / `brew install ffmpeg`)."
+                    "The `faster-whisper` package (and its dependency `ctranslate2`) "
+                    "isn't installed in this environment. Install with:\n\n"
+                    "    pip install faster-whisper ctranslate2\n\n"
+                    "You'll also need `ffmpeg` on your system PATH, or the "
+                    "`imageio-ffmpeg` pip package as a fallback."
                 )
             except Exception as e:
                 status.update(label="Transcription failed", state="error")
@@ -297,6 +289,7 @@ if st.session_state.structured_notes and st.session_state.structured_notes.parag
         st.subheader("Keywords")
         st.write(" · ".join(f"`{k}`" for k in st.session_state.keywords))
 
+    # ── Export ──
     st.divider()
     st.header("📤 Export Notes")
     title = st.text_input("Note title", value="My Notes")
@@ -321,5 +314,75 @@ if st.session_state.structured_notes and st.session_state.structured_notes.parag
             mime=mime_types[fmt],
             use_container_width=True,
         )
+
+    # ── Read Notes Aloud (gTTS — requires internet) ──
+    st.divider()
+    st.header("🔊 Read Notes Aloud")
+    st.caption("Uses gTTS (Google Text-to-Speech) — **requires internet connection**.")
+
+    read_choice = st.selectbox(
+        "What to read aloud",
+        ["Notes", "Summary", "Notes + Summary"],
+    )
+
+    if st.button("🔊 Generate Audio", use_container_width=True):
+        # Build the text to read based on user choice
+        text_to_read = ""
+        if read_choice == "Notes":
+            text_to_read = editable_notes
+        elif read_choice == "Summary":
+            text_to_read = st.session_state.summary
+        elif read_choice == "Notes + Summary":
+            parts = []
+            if editable_notes.strip():
+                parts.append(editable_notes)
+            if st.session_state.summary.strip():
+                parts.append("Summary: " + st.session_state.summary)
+            text_to_read = "\n\n".join(parts)
+
+        if not text_to_read.strip():
+            st.warning("No text available to read aloud. Generate notes or a summary first.")
+        else:
+            with st.spinner("Generating audio with gTTS (requires internet)..."):
+                try:
+                    from gtts import gTTS
+
+                    # Map detected language to gTTS language code
+                    gtts_lang = get_gtts_language(st.session_state.detected_language)
+
+                    tts = gTTS(text=text_to_read, lang=gtts_lang, slow=False)
+                    tmp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+                    tts.save(tmp_audio.name)
+                    tmp_audio.close()
+
+                    st.session_state.read_aloud_path = tmp_audio.name
+
+                    # Play the audio
+                    st.audio(tmp_audio.name, format="audio/mpeg")
+
+                    # Offer download
+                    with open(tmp_audio.name, "rb") as f:
+                        audio_bytes = f.read()
+                    st.download_button(
+                        "⬇️ Download audio (.mp3)",
+                        data=audio_bytes,
+                        file_name=f"{title}_read_aloud.mp3",
+                        mime="audio/mpeg",
+                        use_container_width=True,
+                    )
+
+                except ImportError:
+                    st.error(
+                        "The `gTTS` package is not installed. Install with:\n\n"
+                        "    pip install gTTS"
+                    )
+                except Exception as e:
+                    st.error(
+                        f"Could not generate audio: {e}\n\n"
+                        "gTTS requires an internet connection to reach Google's "
+                        "Text-to-Speech servers. Please check your connection "
+                        "and try again. All other features (ASR, structuring, "
+                        "keywords, extractive summary, export) work offline."
+                    )
 else:
     st.info("Record or upload audio above, or paste a transcript, to get started.")
