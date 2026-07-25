@@ -70,9 +70,8 @@ with st.sidebar:
     model_size = st.selectbox(
         "Whisper model size",
         MODEL_SIZES,
-        index=MODEL_SIZES.index("small"),
-        help="Larger models are more accurate but slower and use more memory. "
-             "'small' is a good balance for most machines.",
+        index=MODEL_SIZES.index("base"),
+        help="Larger models are more accurate but slower and use more memory.",
     )
 
     decoding_speed = st.radio(
