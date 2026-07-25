@@ -40,6 +40,33 @@ except ImportError:  # pragma: no cover - optional dependency at import time
 PAUSE_THRESHOLD = 2.0          # seconds - gap that triggers a new paragraph
 SENTENCES_PER_PARAGRAPH = 4    # fallback when no timestamps are available
 
+# ──────────────────────────────────────────────────────────
+# Non-English stopword sets, used by summarizer.py so TF-IDF/TextRank
+# scoring for Hindi and Assamese transcripts doesn't treat every function
+# word (और, है, को, মই, আছে, etc.) as equally important content — without
+# this, summaries and keyword weighting for these languages are diluted
+# since none of those words match the English-only stopword list.
+# ──────────────────────────────────────────────────────────
+HINDI_STOPWORDS = {
+    "और", "है", "हैं", "था", "थी", "थे", "को", "का", "की", "के", "में",
+    "से", "पर", "यह", "वह", "ये", "वे", "एक", "भी", "तो", "ही", "जो",
+    "कि", "हो", "हूँ", "कर", "करना", "किया", "करते", "करती", "गया",
+    "गई", "गए", "अगर", "लेकिन", "मगर", "क्या", "कैसे", "यहाँ", "वहाँ",
+    "अब", "फिर", "नहीं", "ना", "न", "जब", "तब", "सब", "कुछ", "कोई",
+    "इस", "उस", "इन", "उन", "मैं", "हम", "तुम", "आप", "मुझे", "हमें",
+    "उसे", "उन्हें", "अपना", "अपनी", "अपने", "साथ", "लिए", "द्वारा",
+    "बाद", "पहले", "जैसे", "वाला", "वाली", "वाले", "बहुत", "सभी",
+}
+
+ASSAMESE_STOPWORDS = {
+    "আৰু", "হয়", "আছে", "আছিল", "আছিলে", "কৰি", "কৰা", "কৰে", "কৰিছে",
+    "এই", "সেই", "যি", "তেওঁ", "মই", "আমি", "তুমি", "আপুনি", "তোমাৰ",
+    "মোৰ", "আমাৰ", "কি", "কেনেকৈ", "ইয়াত", "তাত", "এতিয়া", "যদি",
+    "কিন্তু", "নহয়", "নাই", "যেতিয়া", "তেতিয়া", "যাৰ", "তাৰ", "এটা",
+    "এটি", "সকলো", "কিছু", "কোনো", "লগত", "বাবে", "পিছত", "আগত", "যেন",
+    "খুব", "ভাল", "ইয়াক", "তাক", "সিহঁত", "তেওঁলোক",
+}
+
 # Basic sentence-final punctuation for major scripts (Latin, Devanagari,
 # Arabic, CJK use different terminal punctuation; regex covers the common
 # ones so the tool degrades gracefully across languages).

@@ -125,6 +125,19 @@ VAD_PARAMETERS = {
     "speech_pad_ms": 400,
 }
 
+# Whisper sometimes transliterates certain languages into Latin script
+# instead of their native script (e.g. Hindi as "aap kaise ho" instead of
+# "आप कैसे हो"), especially on smaller models or ambiguous audio. Seeding
+# the decoder with a short native-script prompt biases it toward
+# continuing in the correct script for the rest of the transcript. Only
+# applied when a specific language is selected (not Auto-detect) and the
+# task is "transcribe" (script-seeding doesn't apply to "translate",
+# which always outputs English).
+SCRIPT_SEED_PROMPTS = {
+    "hi": "यह हिंदी में एक सामान्य वाक्य है।",
+    "as": "এইটো অসমীয়া ভাষাত এটা সাধাৰণ বাক্য।",
+}
+
 
 # --------------------------------------------------------------------------
 # Language helper functions
@@ -385,6 +398,14 @@ class ASREngine:
         update(f"Using device: {self.device} (compute type: {self.compute_type})")
         update("Starting Faster-Whisper transcription...")
 
+        # Bias the decoder toward the correct native script for languages
+        # Whisper sometimes transliterates into Latin script instead (e.g.
+        # Hindi, Assamese). Only applies when a specific language is
+        # selected and we're transcribing (not translating).
+        initial_prompt = SCRIPT_SEED_PROMPTS.get(language) if task == "transcribe" else None
+        if initial_prompt:
+            update(f"Seeding decoder with native-script prompt for '{language}'...")
+
         try:
             segments_gen, info = model.transcribe(
                 audio_array,
@@ -401,6 +422,7 @@ class ASREngine:
                 # the rest of the file - a well-known cause of
                 # transcripts much shorter than the source audio.
                 condition_on_previous_text=False,
+                initial_prompt=initial_prompt,
             )
 
             transcription_segments = []

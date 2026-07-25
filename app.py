@@ -322,6 +322,7 @@ if st.session_state.structured_notes and st.session_state.structured_notes.parag
                         st.session_state.transcript_text,
                         method=summary_method,
                         num_sentences=num_summary_sentences,
+                        language_code=st.session_state.detected_language,
                     )
                 except MemoryError:
                     st.error(

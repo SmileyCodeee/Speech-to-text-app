@@ -36,7 +36,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from .text_processor import split_sentences
+from .text_processor import split_sentences, HINDI_STOPWORDS, ASSAMESE_STOPWORDS
 
 # ──────────────────────────────────────────────────────────
 # Expanded stopword list — ~250 entries covering:
@@ -147,6 +147,24 @@ _STOPWORDS = {
     "isn", "aren", "wasn", "weren", "haven", "hasn", "hadn",
 }
 
+# Language-keyed stopword lookup — TF-IDF/TextRank scoring uses the set
+# matching the transcript's detected/selected language, instead of always
+# falling back to English stopwords (which don't match Hindi or Assamese
+# script at all, so those languages would otherwise get no stopword
+# filtering whatsoever).
+_STOPWORDS_BY_LANGUAGE = {
+    "en": _STOPWORDS,
+    "hi": HINDI_STOPWORDS,
+    "as": ASSAMESE_STOPWORDS,
+}
+
+
+def _get_stopwords(language_code: Optional[str]) -> set:
+    """Pick the stopword set matching language_code, defaulting to English."""
+    if not language_code:
+        return _STOPWORDS
+    return _STOPWORDS_BY_LANGUAGE.get(language_code[:2].lower(), _STOPWORDS)
+
 
 def _is_online(host: str = "huggingface.co", port: int = 443, timeout: float = 3.0) -> bool:
     """
@@ -162,7 +180,7 @@ def _is_online(host: str = "huggingface.co", port: int = 443, timeout: float = 3
         return False
 
 
-def _compute_idf(sentences: List[str], vocab_index: dict) -> np.ndarray:
+def _compute_idf(sentences: List[str], vocab_index: dict, stopwords: set) -> np.ndarray:
     """
     Compute smoothed inverse document frequency (IDF) for each vocabulary
     word across all candidate sentences.
@@ -182,7 +200,7 @@ def _compute_idf(sentences: List[str], vocab_index: dict) -> np.ndarray:
     for sent in sentences:
         unique_words = set(
             w for w in re.findall(r"\w+", sent.lower())
-            if w not in _STOPWORDS
+            if w not in stopwords
         )
         for w in unique_words:
             if w in vocab_index:
@@ -194,7 +212,7 @@ def _compute_idf(sentences: List[str], vocab_index: dict) -> np.ndarray:
     return idf
 
 
-def _sentence_vector(sentence: str, vocab_index: dict, idf: np.ndarray) -> np.ndarray:
+def _sentence_vector(sentence: str, vocab_index: dict, idf: np.ndarray, stopwords: set) -> np.ndarray:
     """
     TF-IDF weighted vector for one sentence, stopwords excluded.
 
@@ -208,7 +226,7 @@ def _sentence_vector(sentence: str, vocab_index: dict, idf: np.ndarray) -> np.nd
     The vector is L2-normalized so cosine similarity works correctly.
     """
     vec = np.zeros(len(vocab_index), dtype=np.float32)
-    words = [w for w in re.findall(r"\w+", sentence.lower()) if w not in _STOPWORDS]
+    words = [w for w in re.findall(r"\w+", sentence.lower()) if w not in stopwords]
     for w in words:
         if w in vocab_index:
             vec[vocab_index[w]] += idf[vocab_index[w]]  # TF * IDF
@@ -218,6 +236,7 @@ def _sentence_vector(sentence: str, vocab_index: dict, idf: np.ndarray) -> np.nd
 
 def _textrank_scores(
     sentences: List[str],
+    stopwords: set,
     damping: float = 0.85,
     iterations: int = 30,
 ) -> np.ndarray:
@@ -234,15 +253,15 @@ def _textrank_scores(
     vocab = sorted({
         w for s in sentences
         for w in re.findall(r"\w+", s.lower())
-        if w not in _STOPWORDS
+        if w not in stopwords
     })
     vocab_index = {w: i for i, w in enumerate(vocab)}
 
     # Compute IDF weights across all sentences
-    idf = _compute_idf(sentences, vocab_index)
+    idf = _compute_idf(sentences, vocab_index, stopwords)
 
     # Build TF-IDF weighted sentence vectors
-    vectors = np.stack([_sentence_vector(s, vocab_index, idf) for s in sentences])
+    vectors = np.stack([_sentence_vector(s, vocab_index, idf, stopwords) for s in sentences])
 
     # Cosine similarity matrix (vectors are already L2-normalized)
     sim = vectors @ vectors.T
@@ -260,12 +279,19 @@ def _textrank_scores(
     return scores
 
 
-def summarize_extractive(text: str, num_sentences: int = 5) -> str:
+def summarize_extractive(text: str, num_sentences: int = 5, language_code: Optional[str] = None) -> str:
     """
     Graph-based (TextRank) extractive summarization with TF-IDF weighting
     and position bias. No external model needed — works offline for any
     language.
+
+    language_code selects the stopword set used for scoring (English,
+    Hindi, or Assamese currently). Passing the transcript's actual
+    language matters: without it, non-English function words (और, है,
+    আছে, etc.) are treated as regular content words instead of being
+    filtered out, which dilutes which sentences get selected.
     """
+    stopwords = _get_stopwords(language_code)
     sentences = split_sentences(text)
 
     # Filter out filler/disfluency fragments. Require at least 4 content
@@ -273,7 +299,7 @@ def summarize_extractive(text: str, num_sentences: int = 5) -> str:
     # where 5 are stopwords is not content-bearing.
     candidates = [
         s for s in sentences
-        if len([w for w in re.findall(r"\w+", s.lower()) if w not in _STOPWORDS]) >= 4
+        if len([w for w in re.findall(r"\w+", s.lower()) if w not in stopwords]) >= 4
     ]
     if not candidates:
         # Relaxed fallback: accept sentences with >= 3 total words
@@ -286,8 +312,8 @@ def summarize_extractive(text: str, num_sentences: int = 5) -> str:
 
     target = max(1, min(num_sentences, round(len(candidates) * 0.4)))
 
-    # TextRank scores (now TF-IDF weighted)
-    scores = _textrank_scores(candidates)
+    # TextRank scores (now TF-IDF weighted, language-aware stopwords)
+    scores = _textrank_scores(candidates, stopwords)
 
     # ── Position bias ──
     # In lectures/meetings/articles, the first sentence is usually the
@@ -408,16 +434,24 @@ def summarize(
     method: str = "extractive",
     num_sentences: int = 5,
     model_name: Optional[str] = None,
+    language_code: Optional[str] = None,
 ) -> str:
+    """
+    language_code (e.g. "hi", "as", "en") is used by extractive
+    summarization to pick the matching stopword set — pass the
+    transcript's detected/selected language for accurate results in
+    Hindi and Assamese, not just English. Abstractive summarization
+    (BART) is English-focused regardless of this value.
+    """
     if not text.strip():
         return ""
     if method == "abstractive":
         try:
             return summarize_abstractive(text, model_name or "facebook/bart-large-cnn")
         except Exception as exc:
-            fallback = summarize_extractive(text, num_sentences)
+            fallback = summarize_extractive(text, num_sentences, language_code=language_code)
             return (
                 f"⚠️ Abstractive summarizer unavailable ({exc}). "
                 f"Showing extractive summary instead:\n\n{fallback}"
             )
-    return summarize_extractive(text, num_sentences)
+    return summarize_extractive(text, num_sentences, language_code=language_code)
