@@ -71,7 +71,9 @@ with st.sidebar:
         "Whisper model size",
         MODEL_SIZES,
         index=MODEL_SIZES.index("base"),
-        help="Larger models are more accurate but slower and use more memory.",
+        help="Larger models are more accurate but slower and use more memory. "
+             "Runs on CPU only — on a low-spec machine, 'tiny' or 'base' are "
+             "recommended; 'small' and up can be noticeably slow.",
     )
 
     decoding_speed = st.radio(
@@ -229,6 +231,24 @@ if audio_source_path:
                         label=f"Transcribed in {elapsed:.1f}s. Detected language: {result.language}",
                         state="complete",
                     )
+
+                    # Coverage check: compares how much of the audio's
+                    # actual duration ended up inside a transcribed
+                    # segment. A low ratio means VAD or Whisper's own
+                    # no-speech detection likely dropped part of the
+                    # recording, even though transcription "succeeded"
+                    # with no error.
+                    ratio = result.coverage_ratio
+                    if ratio is not None and ratio < 0.85:
+                        st.warning(
+                            f"⚠️ The transcript covers about {ratio * 100:.0f}% "
+                            f"of the {result.audio_duration:.0f}s recording "
+                            f"({result.covered_duration:.0f}s transcribed). "
+                            "Part of the audio may have been skipped. Try "
+                            "turning off 'Skip silent stretches (VAD)' in the "
+                            "sidebar, or use a larger model size, then "
+                            "re-transcribe."
+                        )
             except ImportError:
                 status.update(label="Missing dependency", state="error")
                 st.error(

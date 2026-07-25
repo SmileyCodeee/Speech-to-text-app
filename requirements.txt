@@ -1,25 +1,25 @@
 # ──────────────────────────────────────────────────────────
 # Speech-to-Text Note Taking Application — requirements.txt
 # ──────────────────────────────────────────────────────────
+# CPU-only throughout — designed for low-spec local machines and
+# GPU-less hosts like Render. faster-whisper runs int8-quantized on CPU
+# (via ctranslate2, installed automatically as its dependency — no GPU
+# drivers or CUDA toolkit required anywhere in this app).
+#
 # Hybrid architecture:
 #   - ASR / structuring / keywords / extractive summary: OFFLINE
 #   - Abstractive summary: ONLINE (first run, cached after)
 #   - gTTS read aloud: ONLINE
 #   - Export: OFFLINE
 #
-# Only DIRECT dependencies with loose version pins.
-# Transitive deps (CUDA libs, triton, etc.) are resolved
-# automatically by pip — avoids cross-platform conflicts.
-#
-# GPU users: install the CUDA-enabled PyTorch wheel FIRST
-# following https://pytorch.org/get-started/locally/
-# then:  pip install -r requirements.txt
+# Only DIRECT dependencies with loose version pins. Transitive deps are
+# resolved automatically by pip.
 # ──────────────────────────────────────────────────────────
 
 # ── Web UI ──
 streamlit>=1.50.0
 
-# ── ASR — faster-whisper (offline, local) ──
+# ── ASR — faster-whisper (offline, local, CPU-only) ──
 faster-whisper>=1.1.0
 
 # ── Audio processing ──
@@ -35,13 +35,12 @@ python-docx>=1.1.0
 reportlab>=4.2.0
 
 # ── Abstractive summarization (online first run, cached locally after) ──
-# CPU-ONLY torch by default. Without this, `pip install torch` on Linux
-# pulls the CUDA build, which drags in ~1.5GB of unused nvidia-* packages
+# CPU-ONLY torch. Without this, `pip install torch` on Linux pulls the
+# CUDA build, which drags in ~1.5GB of unused nvidia-* packages
 # (nvidia-cublas, nvidia-cudnn, nvidia-cusolver, triton, etc.) — a real
-# problem on memory/disk-constrained hosts like Render, since faster-whisper
-# (the actual ASR engine) doesn't use torch at all and never needed any of
-# this. This index hosts CPU-only wheels for BOTH Windows and Linux, so it's
-# safe to leave in for local Windows development too.
+# problem on memory/disk-constrained hosts like Render and low-spec local
+# machines, since nothing in this app uses a GPU. This index hosts
+# CPU-only wheels for both Windows and Linux.
 --extra-index-url https://download.pytorch.org/whl/cpu
 transformers>=4.30.0
 torch>=2.0.0
