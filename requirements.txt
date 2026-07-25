@@ -1,50 +1,51 @@
-# ──────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Speech-to-Text Note Taking Application — requirements.txt
-# ──────────────────────────────────────────────────────────
-# CPU-only throughout — designed for low-spec local machines and
-# GPU-less hosts like Render. faster-whisper runs int8-quantized on CPU
-# (via ctranslate2, installed automatically as its dependency — no GPU
-# drivers or CUDA toolkit required anywhere in this app).
+# CLOUD-FRIENDLY VERSION — for Streamlit Community Cloud (free tier, ~1GB RAM)
 #
-# Hybrid architecture:
-#   - ASR / structuring / keywords / summary: OFFLINE
-#   - gTTS read aloud: ONLINE
-#   - Export: OFFLINE
+# Deliberately EXCLUDES `transformers` + `torch` (abstractive summarization).
+# Those two packages alone add well over 1GB of install size and the BART
+# model itself is ~1.6GB in memory — that combination reliably exceeds
+# Community Cloud's free-tier memory limit and crashes the app on model
+# load, with no clear error in the logs (it just gets silently killed).
 #
-# Only DIRECT dependencies with loose version pins. Transitive deps are
-# resolved automatically by pip.
-# ──────────────────────────────────────────────────────────
+# The app detects at runtime whether `transformers` is installed and simply
+# hides the "Abstractive" summary option if it isn't — so this lighter
+# requirements.txt is safe to deploy as-is; nothing will crash, abstractive
+# mode just won't be offered.
+#
+# If you want abstractive summarization too and are deploying somewhere
+# with more memory (your own server, Streamlit Cloud paid tier, etc.), use
+# requirements-full.txt instead.
+# ---------------------------------------------------------------------------
 
-# ── Web UI ──
-streamlit>=1.50.0
+# Core UI
+streamlit==1.60.0
 
-# ── ASR — faster-whisper (offline, local, CPU-only) ──
-faster-whisper>=1.1.0
+# Speech recognition (offline) — faster-whisper (CTranslate2 reimplementation
+# of OpenAI Whisper): same model weights/accuracy as openai-whisper, but
+# 2-4x faster on CPU via int8 quantized inference. Pulls in ctranslate2
+# automatically. Stick to "tiny" or "base" model sizes on Community Cloud —
+# "small" and above risk exceeding the free-tier memory limit.
+faster-whisper==1.2.1
 
-# ── Audio processing ──
-soundfile>=0.12.1
-numpy>=1.24.0
-imageio-ffmpeg>=0.5.0          # portable ffmpeg binary (fallback if system ffmpeg missing)
+# Audio decoding/normalization — re-encodes and safely decodes audio before
+# it reaches the ASR engine, avoiding silent 0-sample decode failures on
+# some browser-recorded files.
+soundfile==0.14.0
+numpy==2.5.1
+av==18.0.0
 
-# ── Keyword extraction (offline, local) ──
-yake>=0.4.5
+# Portable ffmpeg fallback — used automatically if ffmpeg isn't found on
+# the system PATH (Community Cloud doesn't have it system-wide by default).
+imageio-ffmpeg==0.6.0
 
-# ── Export (offline, local) ──
-python-docx>=1.1.0
-reportlab>=4.2.0
+# Online transcription mode (Google's free Web Speech API) — lightweight,
+# no local model, works well within Cloud's memory limits.
+SpeechRecognition==3.17.0
 
-# ── Abstractive summarization: REMOVED ──
-# facebook/bart-large-cnn (via transformers + torch) loaded ~1.6GB into RAM
-# on first use, and that memory is typically never returned to the OS for
-# the rest of the process's life. This alone can exceed Render's
-# free/starter plan memory limit (512MB) and cause the whole app to be
-# OOM-killed. The app now uses extractive summarization only, which needs
-# no ML model. To bring abstractive summarization back on a host with more
-# RAM (2GB+), add back:
-#   --extra-index-url https://download.pytorch.org/whl/cpu
-#   transformers>=4.30.0
-#   torch>=2.0.0
-# and restore the "abstractive" option in app.py's summary_method radio.
+# Text processing / keyword extraction (lightweight, multilingual)
+yake==0.7.3
 
-# ── Read Notes Aloud (online — gTTS) ──
-gTTS>=2.3.0
+# Export formats
+python-docx==1.2.0
+reportlab==5.0.0

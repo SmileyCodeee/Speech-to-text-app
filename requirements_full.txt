@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# Speech-to-Text Note Taking Application — requirements-full.txt
+# FULL VERSION — includes abstractive summarization (transformers + torch).
+#
+# Use this for local installs, your own server, or any host with enough
+# memory (abstractive summarization needs roughly 2GB+ of free RAM once the
+# BART model is loaded, on top of whatever the Whisper model itself uses).
+#
+# NOT recommended for Streamlit Community Cloud's free tier — use the
+# lighter requirements.txt there instead, which omits transformers/torch
+# and keeps the app well within the ~1GB memory limit.
+# ---------------------------------------------------------------------------
+
+# Core UI
+streamlit==1.60.0
+
+# Speech recognition (offline) — faster-whisper (CTranslate2 reimplementation
+# of OpenAI Whisper): same model weights/accuracy as openai-whisper, but
+# 2-4x faster on CPU via int8 quantized inference. Pulls in ctranslate2
+# automatically.
+faster-whisper==1.2.1
+
+# Audio decoding/normalization — re-encodes and safely decodes audio before
+# it reaches the ASR engine, avoiding silent 0-sample decode failures on
+# some browser-recorded files.
+soundfile==0.14.0
+numpy==2.5.1
+av==18.0.0
+
+# Portable ffmpeg fallback — used automatically if ffmpeg isn't found on
+# the system PATH, so a system-wide ffmpeg install isn't strictly required.
+imageio-ffmpeg==0.6.0
+
+# Online transcription mode (Google's free Web Speech API) — optional
+# alternative to offline faster-whisper, needs internet at transcription time.
+SpeechRecognition==3.17.0
+
+# Text processing / keyword extraction (lightweight, multilingual)
+yake==0.7.3
+
+# Export formats
+python-docx==1.2.0
+reportlab==5.0.0
+
+# Abstractive summarization (only used if you pick "Abstractive" in the
+# sidebar). Loaded directly via AutoTokenizer/AutoModelForSeq2SeqLM rather
+# than the pipeline() task wrapper, for robustness across transformers
+# versions. Heavy: ~1.6GB model download + significant RAM at inference time.
+transformers==5.14.1
+torch==2.13.0
