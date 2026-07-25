@@ -1,51 +1,38 @@
 # ---------------------------------------------------------------------------
-# Speech-to-Text Note Taking Application — requirements.txt
-# CLOUD-FRIENDLY VERSION — for Streamlit Community Cloud (free tier, ~1GB RAM)
+# Speech-to-Text Note Taking Application — requirements-full.txt
+# FULL VERSION — includes abstractive summarization (transformers + torch).
 #
-# Deliberately EXCLUDES `transformers` + `torch` (abstractive summarization).
-# Those two packages alone add well over 1GB of install size and the BART
-# model itself is ~1.6GB in memory — that combination reliably exceeds
-# Community Cloud's free-tier memory limit and crashes the app on model
-# load, with no clear error in the logs (it just gets silently killed).
+# Use this instead of requirements.txt if you're deploying somewhere with
+# more memory than a free-tier host (your own server, Streamlit Cloud paid
+# tier, a machine with several GB of RAM free) and want the "Abstractive"
+# summary option (Hugging Face facebook/bart-large-cnn) available, not just
+# extractive.
 #
-# The app detects at runtime whether `transformers` is installed and simply
-# hides the "Abstractive" summary option if it isn't — so this lighter
-# requirements.txt is safe to deploy as-is; nothing will crash, abstractive
-# mode just won't be offered.
+#   pip install -r requirements-full.txt
 #
-# If you want abstractive summarization too and are deploying somewhere
-# with more memory (your own server, Streamlit Cloud paid tier, etc.), use
-# requirements-full.txt instead.
+# CPU-only torch: on Linux, a plain `pip install torch` pulls the CUDA
+# build, dragging in well over 1GB of unused nvidia-* packages even on
+# hosts with no GPU at all. --extra-index-url below points pip at PyTorch's
+# CPU-only wheel index (hosts builds for both Windows and Linux), avoiding
+# that bloat. If you actually have an NVIDIA GPU and want CUDA acceleration,
+# install the CUDA-enabled wheel first following
+# https://pytorch.org/get-started/locally/ before running this file.
 # ---------------------------------------------------------------------------
 
-# Core UI
+# Everything from requirements.txt
 streamlit==1.60.0
-
-# Speech recognition (offline) — faster-whisper (CTranslate2 reimplementation
-# of OpenAI Whisper): same model weights/accuracy as openai-whisper, but
-# 2-4x faster on CPU via int8 quantized inference. Pulls in ctranslate2
-# automatically. Stick to "tiny" or "base" model sizes on Community Cloud —
-# "small" and above risk exceeding the free-tier memory limit.
 faster-whisper==1.2.1
-
-# Audio decoding/normalization — re-encodes and safely decodes audio before
-# it reaches the ASR engine, avoiding silent 0-sample decode failures on
-# some browser-recorded files.
 soundfile==0.14.0
 numpy==2.5.1
 av==18.0.0
-
-# Portable ffmpeg fallback — used automatically if ffmpeg isn't found on
-# the system PATH (Community Cloud doesn't have it system-wide by default).
 imageio-ffmpeg==0.6.0
-
-# Online transcription mode (Google's free Web Speech API) — lightweight,
-# no local model, works well within Cloud's memory limits.
-SpeechRecognition==3.17.0
-
-# Text processing / keyword extraction (lightweight, multilingual)
 yake==0.7.3
-
-# Export formats
 python-docx==1.2.0
 reportlab==5.0.0
+
+# Abstractive summarization (see summarizer.py: summarize_abstractive) —
+# needs internet the first time to download facebook/bart-large-cnn
+# (~1.6GB), then works offline from local cache.
+--extra-index-url https://download.pytorch.org/whl/cpu
+transformers>=4.30.0
+torch>=2.0.0
