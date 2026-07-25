@@ -35,6 +35,14 @@ python-docx>=1.1.0
 reportlab>=4.2.0
 
 # ── Abstractive summarization (online first run, cached locally after) ──
+# CPU-ONLY torch by default. Without this, `pip install torch` on Linux
+# pulls the CUDA build, which drags in ~1.5GB of unused nvidia-* packages
+# (nvidia-cublas, nvidia-cudnn, nvidia-cusolver, triton, etc.) — a real
+# problem on memory/disk-constrained hosts like Render, since faster-whisper
+# (the actual ASR engine) doesn't use torch at all and never needed any of
+# this. This index hosts CPU-only wheels for BOTH Windows and Linux, so it's
+# safe to leave in for local Windows development too.
+--extra-index-url https://download.pytorch.org/whl/cpu
 transformers>=4.30.0
 torch>=2.0.0
 
