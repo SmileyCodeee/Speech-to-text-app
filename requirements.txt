@@ -7,8 +7,7 @@
 # drivers or CUDA toolkit required anywhere in this app).
 #
 # Hybrid architecture:
-#   - ASR / structuring / keywords / extractive summary: OFFLINE
-#   - Abstractive summary: ONLINE (first run, cached after)
+#   - ASR / structuring / keywords / summary: OFFLINE
 #   - gTTS read aloud: ONLINE
 #   - Export: OFFLINE
 #
@@ -34,16 +33,18 @@ yake>=0.4.5
 python-docx>=1.1.0
 reportlab>=4.2.0
 
-# ── Abstractive summarization (online first run, cached locally after) ──
-# CPU-ONLY torch. Without this, `pip install torch` on Linux pulls the
-# CUDA build, which drags in ~1.5GB of unused nvidia-* packages
-# (nvidia-cublas, nvidia-cudnn, nvidia-cusolver, triton, etc.) — a real
-# problem on memory/disk-constrained hosts like Render and low-spec local
-# machines, since nothing in this app uses a GPU. This index hosts
-# CPU-only wheels for both Windows and Linux.
---extra-index-url https://download.pytorch.org/whl/cpu
-transformers>=4.30.0
-torch>=2.0.0
+# ── Abstractive summarization: REMOVED ──
+# facebook/bart-large-cnn (via transformers + torch) loaded ~1.6GB into RAM
+# on first use, and that memory is typically never returned to the OS for
+# the rest of the process's life. This alone can exceed Render's
+# free/starter plan memory limit (512MB) and cause the whole app to be
+# OOM-killed. The app now uses extractive summarization only, which needs
+# no ML model. To bring abstractive summarization back on a host with more
+# RAM (2GB+), add back:
+#   --extra-index-url https://download.pytorch.org/whl/cpu
+#   transformers>=4.30.0
+#   torch>=2.0.0
+# and restore the "abstractive" option in app.py's summary_method radio.
 
 # ── Read Notes Aloud (online — gTTS) ──
 gTTS>=2.3.0
