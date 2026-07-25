@@ -165,12 +165,39 @@ class ASREngine:
                     "connection. Subsequent runs load instantly from local cache."
                 )
 
-            self._model = WhisperModel(
-                self.model_size,
-                device="auto",
-                compute_type="int8",
-                cpu_threads=max(1, os.cpu_count() or 4),
-            )
+            cpu_threads = max(1, os.cpu_count() or 4)
+
+            # Try GPU first, but don't trust "auto" to fail gracefully on
+            # its own — faster-whisper/CTranslate2 can detect an NVIDIA GPU
+            # is present yet still crash at load time if the CUDA runtime
+            # libraries (e.g. cublas64_12.dll on Windows) aren't installed.
+            # That showed up as:
+            #   "library cublas64_12.dll is not found or cannot be loaded"
+            # So we explicitly try CUDA, and fall back to CPU on ANY failure
+            # instead of letting that exception crash the whole app.
+            try:
+                if progress_callback:
+                    progress_callback("Trying GPU (CUDA) acceleration...")
+                self._model = WhisperModel(
+                    self.model_size,
+                    device="cuda",
+                    compute_type="float16",
+                    cpu_threads=cpu_threads,
+                )
+            except Exception as gpu_error:
+                if progress_callback:
+                    progress_callback(
+                        f"GPU load failed ({gpu_error}); falling back to CPU. "
+                        "This is expected if the NVIDIA CUDA runtime isn't "
+                        "installed - the app will still work, just without "
+                        "GPU acceleration."
+                    )
+                self._model = WhisperModel(
+                    self.model_size,
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=cpu_threads,
+                )
         return self._model
 
     def transcribe(
