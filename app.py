@@ -2,11 +2,12 @@
 app.py
 ------
 Speech-to-Text Note Taking Application
-A multilingual, offline-capable pipeline that turns spoken audio into
-structured, exportable notes.
+A multilingual, offline pipeline that turns spoken audio into structured,
+exportable notes.
 
-Pipeline: Audio -> ASR (Whisper) -> Text Structuring -> Summarization
-          -> Keyword Extraction -> Export (.txt / .docx / .pdf / .md)
+Pipeline: Audio -> ASR (faster-whisper, CPU) -> Text Structuring
+          -> Summarization -> Keyword Extraction -> Export
+          (.txt / .docx / .pdf / .md)
 
 Run with:  streamlit run app.py
 """
@@ -27,12 +28,11 @@ st.set_page_config(page_title="Speech-to-Text Notes", page_icon="🎙️", layou
 
 # --------------------------------------------------------------------------
 # Detect whether abstractive summarization's dependencies are installed.
-# On memory-constrained hosts (e.g. Streamlit Community Cloud's free tier),
-# `transformers` + `torch` are deliberately left out of requirements.txt —
-# loading the BART model there reliably exceeds the memory limit and
-# crashes the whole app with no clear error. Rather than let the app crash
-# when someone picks "Abstractive", we simply don't offer that option if
-# the packages aren't present.
+# On memory-constrained hosts, `transformers` + `torch` may be deliberately
+# left out of requirements.txt — loading the BART model there can exceed
+# the memory limit and crash the app. Rather than let the app crash when
+# someone picks "Abstractive", we simply don't offer that option if the
+# packages aren't present.
 # --------------------------------------------------------------------------
 ABSTRACTIVE_AVAILABLE = (
     importlib.util.find_spec("transformers") is not None
@@ -78,31 +78,21 @@ with st.sidebar:
         "Whisper model size",
         MODEL_SIZES,
         index=MODEL_SIZES.index("base"),
-        help="Larger models are more accurate but use more memory. On "
-             "memory-limited hosts (e.g. Streamlit Community Cloud's free "
-             "tier), stick to 'tiny' or 'base' — 'small' and above risk "
-             "crashing the app when the model loads.",
+        help="Larger models are more accurate but use more memory and are "
+             "slower on CPU. 'tiny' or 'base' are recommended on low-spec "
+             "machines or memory-limited hosts — 'small' and above are "
+             "noticeably slower and may risk crashing on limited hosting.",
     )
     if model_size in ("medium", "large-v3"):
         st.warning(
-            f"'{model_size}' needs significant RAM to load. This may crash "
-            "the app on memory-limited hosts. Prefer 'tiny' or 'base' if "
-            "you're on a free-tier deployment.",
+            f"'{model_size}' needs significant RAM and CPU time to load and "
+            "run. This may be very slow or crash on memory-limited hosts. "
+            "Prefer 'tiny' or 'base' if you're on a free-tier deployment.",
             icon="⚠️",
         )
 
-    transcription_mode = st.radio(
-        "Transcription mode",
-        ["offline", "online"],
-        format_func=lambda x: "Offline (private, works without internet)" if x == "offline"
-        else "Online (Google Web Speech API, needs internet)",
-        help="Offline uses the local Whisper model. Online uses Google's "
-             "free speech API — no model download or extra memory needed, "
-             "but requires an internet connection and sends audio to Google.",
-    )
-
     decoding_speed = st.radio(
-        "Offline decoding",
+        "Decoding",
         ["fast", "accurate"],
         format_func=lambda x: "Fast (greedy, quickest on CPU)" if x == "fast"
         else "Accurate (beam search, slower on CPU)",
@@ -116,10 +106,10 @@ with st.sidebar:
     vad_filter = st.checkbox(
         "Skip silent stretches (VAD)",
         value=True,
-        help="Speeds up transcription by skipping silence, but downloads a "
-             "small separate voice-activity-detection model on first use. "
-             "Turn this off to test whether a stuck transcription is caused "
-             "by that download rather than the main Whisper model.",
+        help="Speeds up transcription by skipping silence and can reduce "
+             "hallucinated text in true silence. Uses loosened VAD settings "
+             "to avoid clipping real speech, but if you suspect part of "
+             "your recording is being dropped, try disabling this.",
     )
 
     language_name = st.selectbox(
@@ -164,10 +154,10 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Runs locally using faster-whisper for ASR and lightweight, "
-        "language-agnostic NLP for structuring/summarization/keywords. "
-        "Offline mode keeps audio on your machine; online mode sends it to "
-        "Google's speech API."
+        "Runs locally using faster-whisper (CPU-only) for ASR and "
+        "lightweight, language-agnostic NLP for structuring/summarization/"
+        "keywords. Audio and text stay on this machine unless you use "
+        "abstractive summarization or read-aloud, which need internet."
     )
 
 # --------------------------------------------------------------------------
@@ -246,7 +236,6 @@ if audio_source_path:
                     audio_source_path,
                     language=lang_code,
                     task=task,
-                    mode=transcription_mode,
                     beam_size=beam_size,
                     vad_filter=vad_filter,
                     progress_callback=_update,
@@ -256,9 +245,6 @@ if audio_source_path:
                 st.session_state.transcript_text = result.text
                 st.session_state.detected_language = result.language
 
-                # Online mode (and any path with no timestamps) returns an
-                # empty segments list, so fall back to sentence-count-based
-                # structuring instead of leaving paragraphs empty.
                 if result.segments:
                     st.session_state.structured_notes = structure_from_segments(result.segments)
                 else:
@@ -270,28 +256,38 @@ if audio_source_path:
                         "Transcription finished but returned no text. The "
                         "recording may be silent, too quiet, or the wrong "
                         "language was selected — try re-recording, lowering "
-                        "the mic distance, or switching modes."
+                        "the mic distance, or trying a different model size."
                     )
                 else:
                     status.update(
                         label=f"Transcribed in {elapsed:.1f}s. Detected language: {result.language}",
                         state="complete",
                     )
-            except ImportError:
-                status.update(label="Missing dependency", state="error")
-                st.error(
-                    "The `faster-whisper` package isn't installed in this "
-                    "environment. Install with:\n\n`pip install -U faster-whisper`\n\n"
-                    "You'll also need `ffmpeg` installed on your system (e.g. "
-                    "`sudo apt install ffmpeg` / `brew install ffmpeg`), or the "
-                    "`imageio-ffmpeg` package as a fallback."
-                )
+
+                    # coverage_ratio flags when VAD or Whisper's own
+                    # no-speech detection silently dropped part of the
+                    # recording - the transcript can look "done" and
+                    # complete while actually missing a chunk of audio.
+                    ratio = result.coverage_ratio
+                    if ratio is not None and ratio < 0.85:
+                        st.warning(
+                            f"The transcript only covers about {ratio * 100:.0f}% "
+                            "of the recording's duration. Part of the audio may "
+                            "have been skipped as silence — try disabling "
+                            "'Skip silent stretches (VAD)' in the sidebar and "
+                            "transcribing again if this looks incomplete."
+                        )
+            except FileNotFoundError as e:
+                status.update(label="Audio file not found", state="error")
+                st.error(str(e))
+            except ValueError as e:
+                status.update(label="Invalid audio", state="error")
+                st.error(str(e))
             except MemoryError:
                 status.update(label="Out of memory", state="error")
                 st.error(
                     "Transcription ran out of memory. Try a smaller Whisper "
-                    "model size ('tiny' or 'base') from the sidebar, or "
-                    "switch to Online mode, which doesn't load a local model."
+                    "model size ('tiny' or 'base') from the sidebar."
                 )
             except Exception as e:
                 status.update(label="Transcription failed", state="error")
